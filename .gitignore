@@ -1,0 +1,57 @@
+# Python cache / build artifacts
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# IDE / OS files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Local config and secrets
+config.local.json
+*.local.json
+*.secrets.json
+*.secret.json
+.env
+.env.local
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.crt
+*.cer
+credentials*.json
+token*.json
+secret*.json
+auth*.json
+
+# Logs and runtime outputs
+*.log
+nohup.out
+status.json
+preview_images.html
+
+# Local generated assets
+images/
+TMP_*.txt
+*.tmp
+*.temp
+*.bak

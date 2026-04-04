@@ -1,0 +1,10 @@
+# Core dependencies
+requests>=2.31.0
+PyMuPDF>=1.23.0  # For PDF parsing (fitz)
+Pillow>=10.0.0   # For image processing
+
+# Optional but recommended
+python-dotenv>=1.0.0  # For environment variables
+
+# Development (optional)
+pytest>=7.4.0

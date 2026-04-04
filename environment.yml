@@ -1,0 +1,10 @@
+name: vla_paper_crawler
+channels:
+  - defaults
+  - conda-forge
+dependencies:
+  - python=3.10
+  - pip
+  - pip:
+    - requests>=2.31.0
+    - python-dateutil>=2.8.2
