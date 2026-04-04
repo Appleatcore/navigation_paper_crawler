@@ -4,7 +4,7 @@
 
 set -e
 
-CONFIG_FILE="${1:-config.json}"
+CONFIG_FILE="${1:-config.local.json}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 cd "$SCRIPT_DIR"
@@ -33,6 +33,7 @@ echo "=========================================="
 echo "Navigation Paper Crawler - 开始运行"
 echo "时间: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "配置: $CONFIG_FILE"
+echo "日志: $SCRIPT_DIR/paper_crawler.log"
 echo "=========================================="
 
 python3 paper_crawler.py "$CONFIG_FILE"
