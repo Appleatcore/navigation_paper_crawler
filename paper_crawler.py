@@ -95,6 +95,28 @@ def _derive_pdf_link(paper: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+def _normalize_notion_date(value: Optional[str]) -> Optional[str]:
+    """将论文发布日期标准化为 Notion date 可接受的 YYYY-MM-DD。"""
+    if not value:
+        return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    if len(text) >= 10 and text[4] == "-" and text[7] == "-":
+        return text[:10]
+
+    if len(text) == 4 and text.isdigit():
+        return f"{text}-01-01"
+
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        return parsed.strftime("%Y-%m-%d")
+    except Exception:
+        return None
+
+
 def _fetch_institutions_from_semantic_scholar(paper: Dict[str, Any],
                                                ss_api_base: str = "https://api.semanticscholar.org/graph/v1") -> List[str]:
     """从 Semantic Scholar 查询作者机构（发表论文的学校/企业等）
@@ -448,6 +470,28 @@ class NotionClient:
             logger.info("已为数据库添加扩展属性: %s", ", ".join(missing.keys()))
         except Exception as e:
             logger.warning("无法自动添加扩展属性（忽略）: %s", e)
+
+    def ensure_publication_date_property(self):
+        """确保数据库存在论文发布日期字段。"""
+        desired = {
+            "Date": {"date": {}}
+        }
+        try:
+            props = self._get_database()
+            missing = {k: v for k, v in desired.items() if k not in props}
+            if not missing:
+                return
+            resp = requests.patch(
+                f"{self.base_url}/databases/{self.database_id}",
+                headers=self.headers,
+                json={"properties": missing},
+                timeout=15
+            )
+            resp.raise_for_status()
+            self._db_properties_cache = None
+            logger.info("已为数据库添加日期属性: %s", ", ".join(missing.keys()))
+        except Exception as e:
+            logger.warning("无法自动添加日期属性（忽略）: %s", e)
     
     def check_duplicate(self, title: Optional[str] = None, doi: Optional[str] = None, url: Optional[str] = None) -> bool:
         """检查论文是否已存在（通过标题/DOI/URL）"""
@@ -710,6 +754,14 @@ class NotionClient:
                 "start": datetime.now().strftime("%Y-%m-%d")
             }
         }
+
+        publication_date = _normalize_notion_date(paper.get('published_date'))
+        if publication_date:
+            properties["Date"] = {
+                "date": {
+                    "start": publication_date
+                }
+            }
         
         # 添加可选字段
         if paper.get('authors'):
@@ -1855,6 +1907,11 @@ def main():
             figure_extractor = None
     
     # 写入 Notion
+    try:
+        notion.ensure_publication_date_property()
+    except Exception as e:
+        logger.warning("无法确认/创建 Date 属性: %s", e)
+
     added_count = 0
     max_papers_to_add = config.get('max_papers', 999)  # 从配置读取，默认999篇
     for paper in all_papers:

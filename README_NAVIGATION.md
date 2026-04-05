@@ -91,6 +91,7 @@ cp config.template.json config.local.json
 - `Name`：title
 - `Status`：select
 - `Venue`：select
+- `Date`：date
 - `Added`：date
 - `Authors`：rich_text
 - `Year`：number
