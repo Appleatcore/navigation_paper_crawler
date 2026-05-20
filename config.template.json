@@ -9,7 +9,9 @@
     "scifinder"
   ],
   "source_preferences": [
-    "arxiv"
+    "x_mol",
+    "openalex",
+    "crossref"
   ],
   "keywords": [
     "ionic liquid",
@@ -24,10 +26,16 @@
     "polycarbonate",
     "polylactic acid"
   ],
-  "exclude_keywords": [],
-  "days_back": 30,
-  "max_papers": 1,
-  "arxiv_max_results": 5,
+  "exclude_keywords": [
+    "navigation",
+    "robot",
+    "autonomous driving"
+  ],
+  "days_back": 4,
+  "max_papers": 3,
+  "xmol_max_results": 10,
+  "openalex_max_results": 10,
+  "crossref_max_results": 10,
   "semantic_scholar_max_results": 0,
   "use_semantic_scholar": false,
   "enrich_citations": false,
@@ -40,26 +48,21 @@
   "llm_model": "qwen-vl-plus",
   "llm_api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
   "llm_api_key": "YOUR_LLM_API_KEY_HERE",
-  "llm_max_papers": 999,
+  "llm_max_papers": 50,
   "llm_call_interval_s": 1.0,
   "llm_temperature": 0.2,
   "llm_timeout": 120,
   "llm_max_tokens": 500,
-  "llm_use_full_pdf": true,
-  "llm_pdf_max_pages": 30,
-  "llm_pdf_max_chars": 100000,
-  "llm_pdf_extract_images": true,
-  "llm_pdf_max_images": 10,
-  "openalex_mailto": "your_email@example.com",
+  "llm_use_full_pdf": false,
+  "llm_pdf_max_pages": 20,
+  "llm_pdf_max_chars": 30000,
+  "llm_pdf_extract_images": false,
+  "llm_pdf_max_images": 0,
   "log_level": "INFO",
-  "image_host_service": "imgur",
-  "imgur_client_id": "YOUR_IMGUR_CLIENT_ID_HERE",
-  "imgur_api_key": "YOUR_IMGUR_API_KEY_HERE",
-  "imgbb_api_key": "",
 
   "patch_config": {
     "enabled": false,
-    "max_papers_to_scan": 200,
+    "max_papers_to_scan": 10,
     "fields_to_patch": ["pdf_url", "institutions", "citations", "recommend_score"],
 
     "pdf_url": {

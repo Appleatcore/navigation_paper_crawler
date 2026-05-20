@@ -30,7 +30,14 @@ python3 paper_crawler.py config.local.json
 - `source_preferences`
 
 当前代码支持的数据源：
-- `arxiv`
+- `x_mol`
+- `openalex`
+- `crossref`
 - `semantic_scholar`
 
-`target_websites` 用来记录目标论文网站，例如 `x-mol`、`web_of_science`、`scifinder`。当前版本还没有实现这些网站的抓取器。
+`target_websites` 用来记录目标论文网站，例如 `x-mol`、`web_of_science`、`scifinder`。
+
+当前默认抓取顺序：
+- `x_mol` 作为主数据源
+- `openalex`、`crossref` 作为公开接口兜底
+- `semantic_scholar` 保持可选，不默认启用

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 自动爬取化学领域最新论文并写入 Notion 数据库
-支持数据源：arXiv API, Semantic Scholar API
+支持数据源：X-MOL, OpenAlex, Crossref, Semantic Scholar
 定时运行：每 3 天执行一次
 """
 
@@ -13,6 +13,8 @@ import logging
 import requests
 import math
 import tempfile
+import html
+import re
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple, Any
 from pathlib import Path
@@ -115,6 +117,15 @@ def _normalize_notion_date(value: Optional[str]) -> Optional[str]:
         return parsed.strftime("%Y-%m-%d")
     except Exception:
         return None
+
+
+def _strip_html_text(text: Any) -> str:
+    """移除 HTML 标签并压缩空白。"""
+    if not text:
+        return ""
+    value = html.unescape(str(text))
+    value = re.sub(r"<[^>]+>", " ", value)
+    return re.sub(r"\s+", " ", value).strip()
 
 
 def _fetch_institutions_from_semantic_scholar(paper: Dict[str, Any],
@@ -1195,6 +1206,385 @@ class SemanticScholarCrawler:
             return []
 
 
+class XMolCrawler:
+    """X-MOL 搜索接口爬取器。"""
+
+    BASE_URL = "https://www.x-mol.net/api/u/paper/search"
+
+    def __init__(self, keywords: List[str], days_back: int = 3, exclude_terms: Optional[List[str]] = None):
+        self.keywords = keywords
+        self.days_back = days_back
+        self.exclude_terms = exclude_terms or []
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+                          "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "application/json,text/plain,*/*",
+            "Referer": "https://www.x-mol.net/",
+        })
+
+    @staticmethod
+    def _timestamp_ms_to_date(value: Any) -> str:
+        try:
+            timestamp = int(value)
+            if timestamp <= 0:
+                return ""
+            return datetime.utcfromtimestamp(timestamp / 1000).strftime("%Y-%m-%d")
+        except Exception:
+            return ""
+
+    def _extract_results(self, payload: Dict[str, Any]) -> List[Dict[str, Any]]:
+        value = payload.get("value") or {}
+        result = value.get("paperSimpleSearchResult") or {}
+        page_results = result.get("pageResults") or {}
+        entries = page_results.get("results") or []
+        if isinstance(entries, list):
+            return entries
+        return []
+
+    def search(self, max_results: int = 50) -> List[Dict]:
+        papers: List[Dict[str, Any]] = []
+        seen_titles = set()
+        cutoff_date = datetime.now() - timedelta(days=self.days_back)
+        per_query_limit = max(10, min(30, max_results))
+
+        cleaned_keywords = [kw.strip() for kw in self.keywords if isinstance(kw, str) and kw.strip()]
+        if not cleaned_keywords:
+            cleaned_keywords = list(DEFAULT_CHEMISTRY_KEYWORDS)
+
+        for keyword in cleaned_keywords:
+            if len(papers) >= max_results:
+                break
+            params = {"q": keyword}
+            try:
+                logger.info("正在搜索 X-MOL: %s", keyword)
+                response = self.session.get(self.BASE_URL, params=params, timeout=30)
+                response.raise_for_status()
+                data = response.json()
+                entries = self._extract_results(data)
+            except Exception as e:
+                logger.warning("X-MOL 搜索失败 (%s): %s", keyword, e)
+                continue
+
+            for item in entries:
+                title = _strip_html_text(item.get("title"))
+                abstract = _strip_html_text(item.get("summary") or item.get("summaryZh"))
+                if not title:
+                    continue
+                normalized_title = title.casefold()
+                if normalized_title in seen_titles:
+                    continue
+
+                published_date = (
+                    item.get("pubDate")
+                    or self._timestamp_ms_to_date(item.get("publishDate"))
+                    or self._timestamp_ms_to_date(item.get("updateDateWithoutTime"))
+                )
+
+                if published_date:
+                    try:
+                        pub_dt = datetime.strptime(published_date[:10], "%Y-%m-%d")
+                        if pub_dt < cutoff_date:
+                            continue
+                    except Exception:
+                        pass
+
+                if not is_chemistry_related(title, abstract, self.exclude_terms):
+                    logger.debug("过滤非化学论文: %s", title[:60])
+                    continue
+
+                authors = item.get("author")
+                if not authors and isinstance(item.get("authorList"), list):
+                    authors = ", ".join(
+                        a.strip() for a in item.get("authorList", []) if isinstance(a, str) and a.strip()
+                    )
+
+                doi = str(item.get("doi") or "").strip()
+                if doi.lower().startswith("doi:"):
+                    doi = doi.split(":", 1)[1].strip()
+
+                journal_name = _strip_html_text(item.get("journalName") or item.get("journalShortName"))
+                impact_factor = item.get("impactFactor")
+
+                paper = {
+                    "title": title,
+                    "authors": authors or "",
+                    "year": published_date[:4] if published_date else "",
+                    "abstract": abstract[:2000],
+                    "url": item.get("url", ""),
+                    "pdf_url": "",
+                    "doi": doi,
+                    "venue": journal_name or "X-MOL",
+                    "tags": ["Chemistry", "X-MOL"],
+                    "published_date": published_date,
+                    "institutions": item.get("affiliations") or [],
+                }
+                if impact_factor not in (None, ""):
+                    try:
+                        paper["impact_2yr_mean"] = float(impact_factor)
+                    except Exception:
+                        pass
+
+                papers.append(paper)
+                seen_titles.add(normalized_title)
+
+                if len(papers) >= max_results:
+                    break
+
+            if len(entries) >= per_query_limit and len(papers) < max_results:
+                time.sleep(0.5)
+
+        logger.info("从 X-MOL 找到 %d 篇论文", len(papers))
+        return papers
+
+
+class OpenAlexCrawler:
+    """OpenAlex 公开接口爬取器。"""
+
+    BASE_URL = "https://api.openalex.org/works"
+
+    def __init__(self, keywords: List[str], days_back: int = 3, exclude_terms: Optional[List[str]] = None,
+                 mailto: Optional[str] = None):
+        self.keywords = keywords
+        self.days_back = days_back
+        self.exclude_terms = exclude_terms or []
+        self.mailto = mailto
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": f"chemical-paper-crawler/1.0 ({mailto})" if mailto else "chemical-paper-crawler/1.0"
+        })
+
+    @staticmethod
+    def _authors_from_authorships(authorships: Any) -> str:
+        if not isinstance(authorships, list):
+            return ""
+        names = []
+        for authorship in authorships[:20]:
+            if not isinstance(authorship, dict):
+                continue
+            author = authorship.get("author") or {}
+            name = str(author.get("display_name") or "").strip()
+            if name:
+                names.append(name)
+        return ", ".join(names)
+
+    @staticmethod
+    def _institutions_from_authorships(authorships: Any) -> List[str]:
+        institutions: List[str] = []
+        if not isinstance(authorships, list):
+            return institutions
+        for authorship in authorships[:20]:
+            if not isinstance(authorship, dict):
+                continue
+            for institution in authorship.get("institutions") or []:
+                if not isinstance(institution, dict):
+                    continue
+                name = str(institution.get("display_name") or "").strip()
+                if name and name not in institutions:
+                    institutions.append(name)
+        return institutions[:15]
+
+    def search(self, max_results: int = 50) -> List[Dict]:
+        papers: List[Dict[str, Any]] = []
+        seen_titles = set()
+        per_query_limit = max(5, min(25, max_results))
+
+        cleaned_keywords = [kw.strip() for kw in self.keywords if isinstance(kw, str) and kw.strip()]
+        if not cleaned_keywords:
+            cleaned_keywords = list(DEFAULT_CHEMISTRY_KEYWORDS)
+
+        from_date = (datetime.now() - timedelta(days=self.days_back)).strftime("%Y-%m-%d")
+
+        for keyword in cleaned_keywords:
+            if len(papers) >= max_results:
+                break
+
+            params: Dict[str, Any] = {
+                "search": keyword,
+                "per-page": per_query_limit,
+                "filter": f"from_publication_date:{from_date}",
+                "sort": "publication_date:desc",
+            }
+            if self.mailto:
+                params["mailto"] = self.mailto
+
+            try:
+                logger.info("正在搜索 OpenAlex: %s", keyword)
+                response = self.session.get(self.BASE_URL, params=params, timeout=30)
+                response.raise_for_status()
+                data = response.json()
+                results = data.get("results") or []
+            except Exception as e:
+                logger.warning("OpenAlex 搜索失败 (%s): %s", keyword, e)
+                continue
+
+            for item in results:
+                title = str(item.get("display_name") or item.get("title") or "").strip()
+                abstract = ""
+                abstract_inverted = item.get("abstract_inverted_index")
+                if isinstance(abstract_inverted, dict):
+                    words = []
+                    for word, positions in abstract_inverted.items():
+                        if isinstance(positions, list):
+                            for pos in positions:
+                                words.append((pos, word))
+                    if words:
+                        words.sort(key=lambda x: x[0])
+                        abstract = " ".join(word for _, word in words)
+
+                if not title:
+                    continue
+                normalized_title = title.casefold()
+                if normalized_title in seen_titles:
+                    continue
+                if not is_chemistry_related(title, abstract, self.exclude_terms):
+                    continue
+
+                primary_location = item.get("primary_location") or {}
+                source = primary_location.get("source") or {}
+                pdf_url = primary_location.get("pdf_url") or ""
+                doi = str(item.get("doi") or "").strip()
+                if doi.startswith("https://doi.org/"):
+                    doi = doi.split("https://doi.org/", 1)[1]
+
+                published_date = str(item.get("publication_date") or "").strip()
+                paper = {
+                    "title": title,
+                    "authors": self._authors_from_authorships(item.get("authorships")),
+                    "year": str(item.get("publication_year") or ""),
+                    "abstract": abstract[:2000],
+                    "url": primary_location.get("landing_page_url") or item.get("id", ""),
+                    "pdf_url": pdf_url,
+                    "doi": doi,
+                    "venue": source.get("display_name") or "OpenAlex",
+                    "tags": ["Chemistry", "OpenAlex"],
+                    "published_date": published_date,
+                    "institutions": self._institutions_from_authorships(item.get("authorships")),
+                }
+                summary_stats = source.get("summary_stats") or {}
+                impact = summary_stats.get("2yr_mean_citedness")
+                if impact not in (None, ""):
+                    paper["impact_2yr_mean"] = impact
+
+                papers.append(paper)
+                seen_titles.add(normalized_title)
+                if len(papers) >= max_results:
+                    break
+
+        logger.info("从 OpenAlex 找到 %d 篇论文", len(papers))
+        return papers
+
+
+class CrossrefCrawler:
+    """Crossref 公开接口兜底爬取器。"""
+
+    BASE_URL = "https://api.crossref.org/works"
+
+    def __init__(self, keywords: List[str], days_back: int = 3, exclude_terms: Optional[List[str]] = None,
+                 mailto: Optional[str] = None):
+        self.keywords = keywords
+        self.days_back = days_back
+        self.exclude_terms = exclude_terms or []
+        self.mailto = mailto
+        agent = f"chemical-paper-crawler/1.0 (mailto:{mailto})" if mailto else "chemical-paper-crawler/1.0"
+        self.session = requests.Session()
+        self.session.headers.update({"User-Agent": agent})
+
+    @staticmethod
+    def _pick_date(item: Dict[str, Any]) -> str:
+        for field in ("published-print", "published-online", "published", "issued"):
+            date_part = ((item.get(field) or {}).get("date-parts") or [])
+            if date_part and isinstance(date_part[0], list):
+                parts = date_part[0]
+                year = parts[0] if len(parts) > 0 else None
+                month = parts[1] if len(parts) > 1 else 1
+                day = parts[2] if len(parts) > 2 else 1
+                if year:
+                    return f"{int(year):04d}-{int(month):02d}-{int(day):02d}"
+        return ""
+
+    def search(self, max_results: int = 50) -> List[Dict]:
+        papers: List[Dict[str, Any]] = []
+        seen_titles = set()
+        per_query_limit = max(5, min(20, max_results))
+        from_date = (datetime.now() - timedelta(days=self.days_back)).strftime("%Y-%m-%d")
+
+        cleaned_keywords = [kw.strip() for kw in self.keywords if isinstance(kw, str) and kw.strip()]
+        if not cleaned_keywords:
+            cleaned_keywords = list(DEFAULT_CHEMISTRY_KEYWORDS)
+
+        for keyword in cleaned_keywords:
+            if len(papers) >= max_results:
+                break
+
+            params = {
+                "query": keyword,
+                "rows": per_query_limit,
+                "filter": f"from-pub-date:{from_date}",
+                "sort": "published",
+                "order": "desc",
+            }
+            if self.mailto:
+                params["mailto"] = self.mailto
+
+            try:
+                logger.info("正在搜索 Crossref: %s", keyword)
+                response = self.session.get(self.BASE_URL, params=params, timeout=30)
+                response.raise_for_status()
+                items = (response.json().get("message") or {}).get("items") or []
+            except Exception as e:
+                logger.warning("Crossref 搜索失败 (%s): %s", keyword, e)
+                continue
+
+            for item in items:
+                titles = item.get("title") or []
+                title = str(titles[0]).strip() if titles else ""
+                abstract = _strip_html_text(item.get("abstract"))
+                if not title:
+                    continue
+                normalized_title = title.casefold()
+                if normalized_title in seen_titles:
+                    continue
+                if not is_chemistry_related(title, abstract, self.exclude_terms):
+                    continue
+
+                published_date = self._pick_date(item)
+                authors = []
+                for author in item.get("author") or []:
+                    given = str(author.get("given") or "").strip()
+                    family = str(author.get("family") or "").strip()
+                    name = " ".join(part for part in [given, family] if part).strip()
+                    if name:
+                        authors.append(name)
+
+                doi = str(item.get("DOI") or "").strip()
+                url = str(item.get("URL") or "").strip()
+                venue = ""
+                container = item.get("container-title") or []
+                if container:
+                    venue = str(container[0]).strip()
+
+                paper = {
+                    "title": title,
+                    "authors": ", ".join(authors),
+                    "year": published_date[:4] if published_date else "",
+                    "abstract": abstract[:2000],
+                    "url": url,
+                    "pdf_url": "",
+                    "doi": doi,
+                    "venue": venue or "Crossref",
+                    "tags": ["Chemistry", "Crossref"],
+                    "published_date": published_date,
+                }
+                papers.append(paper)
+                seen_titles.add(normalized_title)
+                if len(papers) >= max_results:
+                    break
+
+        logger.info("从 Crossref 找到 %d 篇论文", len(papers))
+        return papers
+
+
 class MetricsEnricher:
     """引用数/影响力指标增强器。
 
@@ -1769,7 +2159,7 @@ def main():
     chemistry_domain = str(config.get('chemistry_domain', '')).strip()
     source_preferences_raw = config.get('source_preferences')
     if source_preferences_raw is None:
-        source_preferences_raw = ['arxiv']
+        source_preferences_raw = ['x_mol', 'openalex', 'crossref']
         if config.get('use_semantic_scholar', False):
             source_preferences_raw.append('semantic_scholar')
     elif isinstance(source_preferences_raw, str):
@@ -1780,10 +2170,13 @@ def main():
         if isinstance(source, str) and source.strip()
     }
     if not source_preferences:
-        source_preferences = {'arxiv'}
+        source_preferences = {'x_mol', 'openalex', 'crossref'}
     days_back = config.get('days_back', 3)
-    arxiv_max_results = int(config.get('arxiv_max_results', 200))
+    xmol_max_results = int(config.get('xmol_max_results', config.get('arxiv_max_results', 200)))
+    openalex_max_results = int(config.get('openalex_max_results', 100))
+    crossref_max_results = int(config.get('crossref_max_results', 100))
     ss_max_results = int(config.get('semantic_scholar_max_results', 50))
+    openalex_mailto = config.get('openalex_mailto')
 
     if not notion_token or not database_id:
         logger.error("配置文件缺少 notion_token 或 database_id")
@@ -1813,15 +2206,49 @@ def main():
     # 爬取论文
     all_papers = []
 
-    # 1. arXiv
-    if 'arxiv' in source_preferences:
-        arxiv_crawler = ArxivCrawler(keywords, days_back, exclude_terms=exclude_keywords)
-        arxiv_papers = arxiv_crawler.search(max_results=arxiv_max_results)
-        all_papers.extend(arxiv_papers)
+    # 1. X-MOL
+    if 'x_mol' in source_preferences or 'x-mol' in source_preferences:
+        xmol_crawler = XMolCrawler(keywords, days_back, exclude_terms=exclude_keywords)
+        xmol_papers = xmol_crawler.search(max_results=xmol_max_results)
+        all_papers.extend(xmol_papers)
     else:
-        logger.info("已跳过 arXiv 数据源")
+        logger.info("已跳过 X-MOL 数据源")
 
-    # 2. Semantic Scholar（可选）
+    # 2. OpenAlex
+    if 'openalex' in source_preferences:
+        openalex_crawler = OpenAlexCrawler(
+            keywords,
+            days_back,
+            exclude_terms=exclude_keywords,
+            mailto=openalex_mailto,
+        )
+        openalex_papers = openalex_crawler.search(max_results=openalex_max_results)
+        if openalex_papers:
+            all_papers.extend(openalex_papers)
+            logger.info("从 OpenAlex 获得 %d 篇额外论文", len(openalex_papers))
+        else:
+            logger.info("OpenAlex 未返回结果")
+    else:
+        logger.info("已跳过 OpenAlex 数据源")
+
+    # 3. Crossref
+    if 'crossref' in source_preferences:
+        crossref_crawler = CrossrefCrawler(
+            keywords,
+            days_back,
+            exclude_terms=exclude_keywords,
+            mailto=openalex_mailto,
+        )
+        crossref_papers = crossref_crawler.search(max_results=crossref_max_results)
+        if crossref_papers:
+            all_papers.extend(crossref_papers)
+            logger.info("从 Crossref 获得 %d 篇额外论文", len(crossref_papers))
+        else:
+            logger.info("Crossref 未返回结果")
+    else:
+        logger.info("已跳过 Crossref 数据源")
+
+    # 4. Semantic Scholar（可选）
     if 'semantic_scholar' in source_preferences:
         logger.info("等待 3 秒后查询 Semantic Scholar (避免API限流)...")
         time.sleep(3)  # 增加延迟避免 429 错误

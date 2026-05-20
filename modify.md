@@ -33,3 +33,14 @@
 - 删除 `test_vla_filter.py`
 - 新增 `test_chemistry_filter.py`
 - 已通过 `pytest -q`
+
+## 5. 数据源切换
+
+- 将主抓取源从 `arxiv` 切换为 `x_mol`
+- 新增 `XMolCrawler`，直接接入 `https://www.x-mol.net/api/u/paper/search`
+- 新增 `OpenAlexCrawler` 和 `CrossrefCrawler` 作为公开接口兜底源
+- 主流程默认数据源顺序调整为 `x_mol` -> `openalex` -> `crossref`
+- 保留 `semantic_scholar` 为可选补充源，不再默认启用
+- 更新 `config.template.json`
+- 更新 `README.md`
+- 保留 `target_websites` 记录用途，但默认运行逻辑不再依赖 `arxiv`
