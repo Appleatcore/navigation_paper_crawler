@@ -1,5 +1,5 @@
 #!/bin/bash
-# Navigation Paper Crawler - 运行脚本
+# Chemistry Paper Crawler - 运行脚本
 # 用法: ./run.sh [config_file]
 
 set -e
@@ -30,7 +30,7 @@ fi
 
 # 运行爬虫
 echo "=========================================="
-echo "Navigation Paper Crawler - 开始运行"
+echo "Chemistry Paper Crawler - 开始运行"
 echo "时间: $(date '+%Y-%m-%d %H:%M:%S')"
 echo "配置: $CONFIG_FILE"
 echo "日志: $SCRIPT_DIR/paper_crawler.log"

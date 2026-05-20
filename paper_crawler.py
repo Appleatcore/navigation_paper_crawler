@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-自动爬取具身导航 (Embodied Navigation) 领域最新论文并写入 Notion 数据库
+自动爬取化学领域最新论文并写入 Notion 数据库
 支持数据源：arXiv API, Semantic Scholar API
 定时运行：每 3 天执行一次
 """
@@ -17,8 +17,8 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional, Tuple, Any
 from pathlib import Path
 
-# Navigation 过滤模块
-from vla_filter import is_navigation_related
+# 化学过滤模块
+from chemistry_filter import DEFAULT_CHEMISTRY_KEYWORDS, is_chemistry_related
 
 # PDF 解析
 try:
@@ -931,9 +931,10 @@ class ArxivCrawler:
     
     BASE_URL = "http://export.arxiv.org/api/query"
     
-    def __init__(self, keywords: List[str], days_back: int = 3):
+    def __init__(self, keywords: List[str], days_back: int = 3, exclude_terms: Optional[List[str]] = None):
         self.keywords = keywords
         self.days_back = days_back
+        self.exclude_terms = exclude_terms or []
 
     def search(self, max_results: int = 50) -> List[Dict]:
         """搜索最近的论文（支持分页）"""
@@ -942,14 +943,7 @@ class ArxivCrawler:
         # 构建搜索查询 - 直接使用配置中的关键词
         cleaned_keywords = [kw.strip() for kw in self.keywords if isinstance(kw, str) and kw.strip()]
         if not cleaned_keywords:
-            cleaned_keywords = [
-                "embodied navigation",
-                "vision-language navigation",
-                "robot navigation",
-                "object navigation",
-                "navigation planning",
-                "robot path planning",
-            ]
+            cleaned_keywords = DEFAULT_CHEMISTRY_KEYWORDS
         query = " OR ".join(
             f'all:"{kw.replace(chr(34), "")}"' for kw in cleaned_keywords
         )
@@ -1036,8 +1030,8 @@ class ArxivCrawler:
                     year = published_date[:4] if published_date and len(published_date) >= 4 else ""
 
                     # 严格过滤
-                    if not is_navigation_related(title, summary):
-                        logger.debug(f"过滤非导航论文: {title[:60]}")
+                    if not is_chemistry_related(title, summary, self.exclude_terms):
+                        logger.debug(f"过滤非化学论文: {title[:60]}")
                         continue
 
                     paper = {
@@ -1049,7 +1043,7 @@ class ArxivCrawler:
                         'pdf_url': pdf_url,
                         'doi': f"arXiv:{arxiv_id}",
                         'venue': 'ArXiv',
-                        'tags': ['Embodied Navigation', 'ArXiv'],
+                        'tags': ['Chemistry', 'ArXiv'],
                         'published_date': published_date,
                     }
                     papers.append(paper)
@@ -1079,10 +1073,11 @@ class SemanticScholarCrawler:
     
     BASE_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
     
-    def __init__(self, keywords: List[str], days_back: int = 3, enrich_institutions: bool = False):
+    def __init__(self, keywords: List[str], days_back: int = 3, enrich_institutions: bool = False, exclude_terms: Optional[List[str]] = None):
         self.keywords = keywords
         self.days_back = days_back
         self.enrich_institutions = enrich_institutions
+        self.exclude_terms = exclude_terms or []
 
     def search(self, max_results: int = 30) -> List[Dict]:
         """搜索最近的论文"""
@@ -1116,9 +1111,9 @@ class SemanticScholarCrawler:
                 title = item.get('title', 'Untitled')
                 abstract = item.get('abstract', '')
 
-                # 严格过滤：只保留真正的具身导航论文
-                if not is_navigation_related(title, abstract):
-                    logger.debug(f"过滤非导航论文: {title[:60]}")
+                # 严格过滤：只保留真正的化学论文
+                if not is_chemistry_related(title, abstract, self.exclude_terms):
+                    logger.debug(f"过滤非化学论文: {title[:60]}")
                     continue
                 
                 authors_list = item.get('authors', [])
@@ -1185,7 +1180,7 @@ class SemanticScholarCrawler:
                     'pdf_url': pdf_url,
                     'doi': doi_field,  # 修复：使用 doi_field 而不是 doi
                     'venue': item.get('venue', 'Conference'),
-                    'tags': ['Embodied Navigation', 'Semantic Scholar'],
+                    'tags': ['Chemistry', 'Semantic Scholar'],
                     'published_date': published_date,  # 保存发布时间用于排序
                     'institutions': institutions,
                 }
@@ -1549,44 +1544,44 @@ class LLMScoringEngine:
         """构建多模态消息（支持文本+图片）"""
         if pdf_content or pdf_images:
             sys_prompt = (
-                "你是Embodied Navigation领域资深论文评审专家。你已获得论文的**完整PDF全文和关键图片**，请深度阅读并分析图片后进行严格且具有区分度的打分(0-100)。\n\n"
+                "你是化学领域资深论文评审专家。你已获得论文的**完整PDF全文和关键图片**，请深度阅读并结合反应路线、谱图、表征图、对照实验和数据表进行严格且具有区分度的打分(0-100)。\n\n"
                 "**评分标准（权重递减）**：\n"
-                "1. Navigation相关性(30%)：是否直接处理具身导航/视觉导航/语言导航/目标导航/点目标导航/社会导航？泛泛的多模态或自动驾驶不算高分\n"
-                "2. 方法创新性(25%)：是否提出新的地图/记忆/规划/策略学习/多模态grounding机制？还是简单复用已有框架？检查Method章节细节和架构图\n"
-                "3. 实验严谨性(20%)：真实机器人实验>仿真；多场景多目标>单场景；包含标准导航基准、长时程任务、消融实验更佳。细看Experiments章节和结果图表\n"
-                "4. 技术深度(15%)：是否解决长时程规划、探索、建图、定位、sim2real、鲁棒性、多模态指令理解等核心难点？检查技术细节\n"
-                "5. 影响潜力(10%)：顶会/高引用/知名机构/开源代码/可复现性高？\n\n"
+                "1. 化学相关性(30%)：是否直接处理有机/无机/配位/催化/电化学/材料/分析/计算化学/化学生物学中的核心问题？与化学关系弱的工作不算高分\n"
+                "2. 方法或分子/反应创新性(25%)：是否提出新反应、新催化体系、新分子设计、新表征方法、新计算策略或新实验流程？\n"
+                "3. 实验或计算证据强度(20%)：是否有完整表征、对照实验、收率/选择性/误差分析、机理验证、DFT/MD/统计验证等？\n"
+                "4. 机理深度与可复现性(15%)：是否解释结构-性能关系、反应机理或作用路径，条件和数据是否足够清晰？\n"
+                "5. 影响潜力(10%)：期刊/会议质量、适用范围、开放数据/代码、后续可延展性如何？\n\n"
                 "**打分区间参考**：\n"
-                "- 90-100: 突破性工作(导航新范式/SOTA/真实机器人强验证/高影响力)\n"
-                "- 75-89: 优秀创新(方法新颖/实验扎实/导航场景覆盖广)\n"
-                "- 60-74: 中等质量(有一定创新但不够突出/验证主要在仿真)\n"
-                "- 40-59: 边缘相关(导航相关性弱/实验单薄/仅局部模块改进)\n"
-                "- 0-39: 不推荐(与具身导航关系不大/缺少导航任务验证)\n\n"
+                "- 90-100: 领域突破性工作，创新强、证据扎实、潜在影响大\n"
+                "- 75-89: 明显优质工作，方法/结果有新意且验证充分\n"
+                "- 60-74: 合格但不突出，有一定价值但创新或证据有限\n"
+                "- 40-59: 边缘相关，问题不够聚焦或支撑不足\n"
+                "- 0-39: 不推荐，与目标化学方向相关性很弱\n\n"
                 "**严格要求**：\n"
-                "- 避免打分集中在70-80，主动拉开差距！顶级工作给高分，平庸工作给低分\n"
-                "- **必须分析图片内容**（系统架构图、地图/轨迹结果图、对比图表等），并在评分依据中引用\n"
-                "- 必须引用PDF中的具体章节/实验/图表来支撑你的评分\n"
+                "- 避免打分集中在70-80，主动拉开差距\n"
+                "- **必须分析图片内容**（反应路线、结构图、谱图、表征图、结果图表等），并在评分依据中引用\n"
+                "- 必须引用PDF中的具体章节、实验或图表来支撑你的评分\n"
                 "- 如果PDF不完整或无法解析关键内容，在rationale中说明\n"
                 "- **评分理由必须用中文书写**，不要使用英文\n\n"
                 "只返回JSON格式: {\"score\": 数字, \"rationale\": \"<300字中文评分依据，需引用PDF具体内容和图片分析>\"}，不要其它内容。"
             )
         else:
             sys_prompt = (
-                "你是Embodied Navigation领域资深论文评审专家。请基于元数据进行严格且具有区分度的打分(0-100)。\n\n"
+                "你是化学领域资深论文评审专家。请基于元数据进行严格且具有区分度的打分(0-100)。\n\n"
                 "**评分标准（权重递减）**：\n"
-                "1. Navigation相关性(30%)：是否直接处理具身导航/视觉导航/语言导航/目标导航/点目标导航/社会导航？泛泛的多模态或自动驾驶不算高分\n"
-                "2. 方法创新性(25%)：是否提出新的地图、记忆、规划、策略学习或多模态grounding机制？还是简单组合现有方法？\n"
-                "3. 实验严谨性(20%)：真实机器人实验>仿真；多场景多目标>单场景；有标准导航基准与消融实验更佳\n"
-                "4. 技术深度(15%)：是否解决长时程规划、探索、建图、定位、sim2real、鲁棒性、多模态指令理解等难点？\n"
-                "5. 影响潜力(10%)：顶会/高引/知名机构/开源代码/可复现性高？\n\n"
+                "1. 化学相关性(30%)：是否直接处理有机/无机/配位/催化/电化学/材料/分析/计算化学/化学生物学中的核心问题？与化学关系弱的工作不算高分\n"
+                "2. 方法或分子/反应创新性(25%)：是否提出新反应、新催化体系、新分子设计、新表征方法、新计算策略或新实验流程？\n"
+                "3. 实验或计算证据强度(20%)：是否有完整表征、对照实验、收率/选择性/误差分析、机理验证、DFT/MD/统计验证等？\n"
+                "4. 机理深度与可复现性(15%)：是否解释结构-性能关系、反应机理或作用路径，条件和数据是否足够清晰？\n"
+                "5. 影响潜力(10%)：期刊/会议质量、适用范围、开放数据/代码、后续可延展性如何？\n\n"
                 "**打分区间参考**：\n"
-                "- 90-100: 突破性工作(导航新范式/SOTA/真实机器人强验证/高影响力)\n"
-                "- 75-89: 优秀创新(方法新颖/实验扎实/导航场景覆盖广)\n"
-                "- 60-74: 中等质量(有一定创新但不够突出/验证主要在仿真)\n"
-                "- 40-59: 边缘相关(导航相关性弱/方法平庸/实验单薄)\n"
-                "- 0-39: 不推荐(与具身导航关系不大/缺少导航任务验证)\n\n"
+                "- 90-100: 领域突破性工作，创新强、证据扎实、潜在影响大\n"
+                "- 75-89: 明显优质工作，方法/结果有新意且验证充分\n"
+                "- 60-74: 合格但不突出，有一定价值但创新或证据有限\n"
+                "- 40-59: 边缘相关，问题不够聚焦或支撑不足\n"
+                "- 0-39: 不推荐，与目标化学方向相关性很弱\n\n"
                 "**严格要求**：\n"
-                "- 避免打分集中在70-80，主动拉开差距！顶级工作给高分，平庸工作给低分\n"
+                "- 避免打分集中在70-80，主动拉开差距\n"
                 "- **评分理由必须用中文书写**，不要使用英文\n\n"
                 "只返回JSON格式: {\"score\": 数字, \"rationale\": \"<200字中文评分依据，需说明扣分/加分原因>\"}，不要其它内容。"
             )
@@ -1726,7 +1721,7 @@ class LLMScoringEngine:
             return None, None
 
 
-def load_config(config_path: str = "config_lcj.json") -> Dict:
+def load_config(config_path: str = "config.local.json") -> Dict:
     """加载配置文件"""
     if not os.path.exists(config_path):
         logger.error(f"配置文件不存在: {config_path}")
@@ -1739,7 +1734,7 @@ def load_config(config_path: str = "config_lcj.json") -> Dict:
 def main():
     """主函数"""
     # 支持命令行参数指定配置文件
-    config_path = sys.argv[1] if len(sys.argv) > 1 else "config.json"
+    config_path = sys.argv[1] if len(sys.argv) > 1 else "config.local.json"
     config = load_config(config_path)
     apply_log_level(config.get('log_level', 'INFO'))
 
@@ -1750,14 +1745,42 @@ def main():
 
     notion_token = config.get('notion_token')
     database_id = config.get('database_id')
-    keywords = config.get('keywords', [
-        'embodied navigation',
-        'vision-language navigation',
-        'robot navigation',
-        'object navigation',
-        'navigation planning',
-        'robot path planning',
-    ])
+    keywords_raw = config.get('keywords')
+    if keywords_raw is None:
+        keywords = list(DEFAULT_CHEMISTRY_KEYWORDS)
+    elif isinstance(keywords_raw, str):
+        keywords = [keywords_raw.strip()] if keywords_raw.strip() else list(DEFAULT_CHEMISTRY_KEYWORDS)
+    else:
+        keywords = [
+            kw.strip()
+            for kw in keywords_raw
+            if isinstance(kw, str) and kw.strip()
+        ]
+        if not keywords:
+            keywords = list(DEFAULT_CHEMISTRY_KEYWORDS)
+    exclude_keywords_raw = config.get('exclude_keywords', [])
+    if isinstance(exclude_keywords_raw, str):
+        exclude_keywords_raw = [exclude_keywords_raw]
+    exclude_keywords = [
+        kw.strip()
+        for kw in exclude_keywords_raw
+        if isinstance(kw, str) and kw.strip()
+    ]
+    chemistry_domain = str(config.get('chemistry_domain', '')).strip()
+    source_preferences_raw = config.get('source_preferences')
+    if source_preferences_raw is None:
+        source_preferences_raw = ['arxiv']
+        if config.get('use_semantic_scholar', False):
+            source_preferences_raw.append('semantic_scholar')
+    elif isinstance(source_preferences_raw, str):
+        source_preferences_raw = [source_preferences_raw]
+    source_preferences = {
+        str(source).strip().lower()
+        for source in source_preferences_raw
+        if isinstance(source, str) and source.strip()
+    }
+    if not source_preferences:
+        source_preferences = {'arxiv'}
     days_back = config.get('days_back', 3)
     arxiv_max_results = int(config.get('arxiv_max_results', 200))
     ss_max_results = int(config.get('semantic_scholar_max_results', 50))
@@ -1766,6 +1789,24 @@ def main():
         logger.error("配置文件缺少 notion_token 或 database_id")
         sys.exit(1)
 
+    if chemistry_domain:
+        logger.info("化学子领域: %s", chemistry_domain)
+    target_websites = config.get('target_websites') or []
+    if isinstance(target_websites, str):
+        target_websites = [target_websites]
+    target_websites = [
+        site.strip()
+        for site in target_websites
+        if isinstance(site, str) and site.strip()
+    ]
+    if target_websites:
+        logger.info("目标论文网站: %s", ", ".join(target_websites))
+    if keywords:
+        logger.info("检索关键词: %s", ", ".join(keywords[:10]))
+    if exclude_keywords:
+        logger.info("排除关键词: %s", ", ".join(exclude_keywords))
+    logger.info("启用数据源: %s", ", ".join(sorted(source_preferences)))
+
     # 初始化客户端
     notion = NotionClient(notion_token, database_id)
 
@@ -1773,21 +1814,31 @@ def main():
     all_papers = []
 
     # 1. arXiv
-    arxiv_crawler = ArxivCrawler(keywords, days_back)
-    arxiv_papers = arxiv_crawler.search(max_results=arxiv_max_results)
-    all_papers.extend(arxiv_papers)
+    if 'arxiv' in source_preferences:
+        arxiv_crawler = ArxivCrawler(keywords, days_back, exclude_terms=exclude_keywords)
+        arxiv_papers = arxiv_crawler.search(max_results=arxiv_max_results)
+        all_papers.extend(arxiv_papers)
+    else:
+        logger.info("已跳过 arXiv 数据源")
 
     # 2. Semantic Scholar（可选）
-    if config.get('use_semantic_scholar', False):
+    if 'semantic_scholar' in source_preferences:
         logger.info("等待 3 秒后查询 Semantic Scholar (避免API限流)...")
         time.sleep(3)  # 增加延迟避免 429 错误
-        ss_crawler = SemanticScholarCrawler(keywords, days_back, enrich_institutions=config.get('enrich_institutions', True))
+        ss_crawler = SemanticScholarCrawler(
+            keywords,
+            days_back,
+            enrich_institutions=config.get('enrich_institutions', True),
+            exclude_terms=exclude_keywords,
+        )
         ss_papers = ss_crawler.search(max_results=ss_max_results)
         if ss_papers:
             all_papers.extend(ss_papers)
             logger.info(f"从 Semantic Scholar 获得 {len(ss_papers)} 篇额外论文")
         else:
             logger.info("Semantic Scholar 未返回结果（可能因限流或无新论文）")
+    else:
+        logger.info("已跳过 Semantic Scholar 数据源")
     
     # 按发布时间排序（最新的在前）
     all_papers.sort(key=lambda p: p.get('published_date', ''), reverse=True)
@@ -1843,6 +1894,14 @@ def main():
         llm_engine = None
         llm_max_papers = int(config.get('llm_max_papers', 50))
         llm_interval_s = float(config.get('llm_call_interval_s', 0.4))
+        scoring_extra_instructions = None
+        if chemistry_domain or exclude_keywords:
+            extra_bits = []
+            if chemistry_domain:
+                extra_bits.append(f"聚焦化学子领域: {chemistry_domain}")
+            if exclude_keywords:
+                extra_bits.append(f"排除关键词: {', '.join(exclude_keywords)}")
+            scoring_extra_instructions = "；".join(extra_bits)
         if llm_enabled:
             llm_engine = LLMScoringEngine(
                 provider=config.get('llm_provider', 'openai'),
@@ -1869,7 +1928,7 @@ def main():
             try:
                 if llm_enabled and llm_engine is not None and idx < llm_max_papers:
                     logger.info("开始 LLM 评分 (%d/%d): %s", idx + 1, min(len(all_papers), llm_max_papers), p.get('title', 'Unknown')[:80])
-                    score, rationale = llm_engine.score_paper(p)
+                    score, rationale = llm_engine.score_paper(p, extra_instructions=scoring_extra_instructions)
                     if score is not None:
                         p['recommend_score'] = score
                         if rationale:

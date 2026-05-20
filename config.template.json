@@ -2,19 +2,34 @@
   "notion_token": "YOUR_NOTION_TOKEN_HERE",
   "database_id": "YOUR_DATABASE_ID_HERE",
 
-  "keywords": [
-    "embodied navigation",
-    "vision-language navigation",
-    "robot navigation",
-    "object navigation",
-    "navigation planning",
-    "robot path planning"
+  "chemistry_domain": "plastic degradation",
+  "target_websites": [
+    "x-mol",
+    "web_of_science",
+    "scifinder"
   ],
-  "days_back": 2,
-  "max_papers": 50,
-  "arxiv_max_results": 100,
-  "semantic_scholar_max_results": 30,
-  "use_semantic_scholar": true,
+  "source_preferences": [
+    "arxiv"
+  ],
+  "keywords": [
+    "ionic liquid",
+    "plastic degradation",
+    "high-value recycling",
+    "W catalysis",
+    "tungsten catalysis",
+    "PET degradation",
+    "polycarbonate degradation",
+    "PLA degradation",
+    "polyethylene terephthalate",
+    "polycarbonate",
+    "polylactic acid"
+  ],
+  "exclude_keywords": [],
+  "days_back": 30,
+  "max_papers": 1,
+  "arxiv_max_results": 5,
+  "semantic_scholar_max_results": 0,
+  "use_semantic_scholar": false,
   "enrich_citations": false,
   "enrich_impact": false,
   "enrich_institutions": true,
