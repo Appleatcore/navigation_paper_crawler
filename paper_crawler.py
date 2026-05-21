@@ -119,6 +119,50 @@ def _normalize_notion_date(value: Optional[str]) -> Optional[str]:
         return None
 
 
+def _normalize_notion_multi_select_name(value: Any) -> Optional[str]:
+    """将 multi_select 选项名规范化为 Notion 可接受的字符串。"""
+    if value is None:
+        return None
+
+    if isinstance(value, dict):
+        raw = value.get('name') or value.get('display_name') or value.get('displayName') or value.get('title')
+    else:
+        raw = value
+
+    text = str(raw).strip()
+    if not text:
+        return None
+
+    text = html.unescape(text)
+    text = re.sub(r'\s+', ' ', text.replace('\n', ' ')).strip()
+    text = text.replace(',', ' / ')
+    text = re.sub(r'\s+/\s+', ' / ', text).strip()
+    text = text.strip(' /')
+
+    if not text:
+        return None
+
+    return text[:100]
+
+
+def _build_notion_multi_select_options(values: Any, limit: int = 15) -> List[Dict[str, str]]:
+    """从原始值构造 Notion multi_select 选项列表。"""
+    if not values:
+        return []
+
+    options: List[Dict[str, str]] = []
+    seen = set()
+    for value in values:
+        name = _normalize_notion_multi_select_name(value)
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        options.append({"name": name})
+        if len(options) >= limit:
+            break
+    return options
+
+
 def _strip_html_text(text: Any) -> str:
     """移除 HTML 标签并压缩空白。"""
     if not text:
@@ -684,10 +728,22 @@ class NotionClient:
             return True
 
         try:
+            sanitized_updates: Dict[str, Any] = {}
+            for field_name, value in updates.items():
+                if isinstance(value, dict) and 'multi_select' in value and isinstance(value.get('multi_select'), list):
+                    multi_select = _build_notion_multi_select_options(value.get('multi_select'), limit=15)
+                    if multi_select:
+                        sanitized_updates[field_name] = {'multi_select': multi_select}
+                    continue
+                sanitized_updates[field_name] = value
+
+            if not sanitized_updates:
+                return True
+
             response = requests.patch(
                 f"{self.base_url}/pages/{page_id}",
                 headers=self.headers,
-                json={"properties": updates},
+                json={"properties": sanitized_updates},
                 timeout=15
             )
             response.raise_for_status()
@@ -807,9 +863,7 @@ class NotionClient:
         
         if paper.get('tags'):
             properties["Tags"] = {
-                "multi_select": [
-                    {"name": tag} for tag in paper['tags'][:10]
-                ]
+                "multi_select": _build_notion_multi_select_options(paper.get('tags', []), limit=10)
             }
         
         # 指标字段（可选）
@@ -825,14 +879,10 @@ class NotionClient:
 
         # 机构字段（如果有）
         if paper.get('institutions'):
-            unique_insts = []
-            for inst in paper['institutions']:
-                name = inst.strip()[:100]
-                if name and name not in unique_insts:
-                    unique_insts.append(name)
-            if unique_insts:
+            institutions = _build_notion_multi_select_options(paper.get('institutions', []), limit=15)
+            if institutions:
                 properties["Institutions"] = {
-                    "multi_select": [{"name": n} for n in unique_insts[:15]]
+                    "multi_select": institutions
                 }
 
         # 推荐评分字段
@@ -1930,6 +1980,59 @@ class LLMScoringEngine:
     def _endpoint(self) -> str:
         return f"{self.api_base}/chat/completions"
 
+    @staticmethod
+    def _extract_json_candidate(content: str) -> Optional[str]:
+        text = (content or "").strip()
+        if not text:
+            return None
+
+        fence_match = re.search(r"```(?:json)?\s*(\{.*?\})\s*```", text, re.DOTALL | re.IGNORECASE)
+        if fence_match:
+            return fence_match.group(1).strip()
+
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            return text[start:end + 1].strip()
+        return None
+
+    def _parse_llm_response(self, content: str) -> Tuple[Optional[float], Optional[str]]:
+        text = (content or "").strip()
+        if not text:
+            return None, None
+
+        candidates = [text]
+        json_candidate = self._extract_json_candidate(text)
+        if json_candidate and json_candidate != text:
+            candidates.insert(0, json_candidate)
+
+        for candidate in candidates:
+            try:
+                obj = json.loads(candidate)
+                score = float(obj.get("score"))
+                rationale = str(obj.get("rationale", "")).strip()
+                score = min(100.0, max(0.0, score))
+                return round(score, 2), rationale[:2000] if rationale else None
+            except Exception:
+                continue
+
+        m = re.search(r"(\d{1,3})", text)
+        if m:
+            sc = min(100.0, max(0.0, float(m.group(1))))
+            rationale = None
+            json_candidate = self._extract_json_candidate(text)
+            if json_candidate:
+                try:
+                    obj = json.loads(json_candidate)
+                    rationale_text = str(obj.get("rationale", "")).strip()
+                    if rationale_text:
+                        rationale = rationale_text[:2000]
+                except Exception:
+                    pass
+            return round(sc, 2), rationale
+
+        return None, None
+
     def _build_messages(self, paper: Dict, extra_instructions: Optional[str] = None, pdf_content: Optional[str] = None, pdf_images: Optional[List[str]] = None) -> List[Dict]:
         """构建多模态消息（支持文本+图片）"""
         if pdf_content or pdf_images:
@@ -2084,28 +2187,15 @@ class LLMScoringEngine:
             content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
             content = content.strip()
             logger.debug("LLM 原始返回片段: %s", content[:1000] if content else "<empty>")
-            # 期望纯 JSON
-            try:
-                obj = json.loads(content)
-                score = float(obj.get("score"))
-                rationale = str(obj.get("rationale", "")).strip()
-                if score < 0: score = 0.0
-                if score > 100: score = 100.0
+            score, rationale = self._parse_llm_response(content)
+            if score is not None:
                 if rationale:
                     logger.info("LLM 返回成功: score=%.2f, rationale_len=%d", score, len(rationale))
                 else:
                     logger.warning("LLM 返回了 score=%.2f，但 rationale 为空", score)
-                return round(score, 2), rationale[:2000]
-            except Exception:
-                # 容错：粗暴提取 0-100 数字
-                import re
-                m = re.search(r"(\d{1,3})", content)
-                if m:
-                    sc = min(100.0, max(0.0, float(m.group(1))))
-                    logger.warning("LLM 返回非JSON，已容错提取 score=%.2f；原始内容片段: %s", sc, content[:300])
-                    return round(sc, 2), content[:2000]
-                logger.warning("LLM 返回无法解析为 score；原始内容片段: %s", content[:300] if content else "<empty>")
-                return None, content[:2000] if content else None
+                return score, rationale
+            logger.warning("LLM 返回无法解析为 score/rationale；原始内容片段: %s", content[:300] if content else "<empty>")
+            return None, None
         except Exception as e:
             logger.warning("LLM 打分失败: %s", e)
             return None, None
