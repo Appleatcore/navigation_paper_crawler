@@ -151,6 +151,7 @@ tail -f paper_crawler.log
 - 最多写入 10 篇到 Notion
 - 最多给 5 篇调用 Qwen 评分
 - 先控制 API 成本和日志量
+- 爬虫内部会把 `arXiv` / `Semantic Scholar` 的单次请求拆成更小分页，并在 `429` 时退避后再重试一次
 
 ## 如果想多搜几篇
 

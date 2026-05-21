@@ -48,6 +48,10 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+DEFAULT_HTTP_HEADERS = {
+    "User-Agent": "navigation-paper-crawler/1.0"
+}
+
 
 def apply_log_level(level_name: str) -> None:
     """Apply configured log level to root logger and all existing handlers."""
@@ -117,6 +121,126 @@ def _normalize_notion_date(value: Optional[str]) -> Optional[str]:
         return None
 
 
+def _has_env_proxy() -> bool:
+    """是否配置了 requests 默认会读取的环境代理。"""
+    proxy_keys = (
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+    )
+    return any(os.environ.get(key) for key in proxy_keys)
+
+
+def _should_retry_without_proxy(exc: requests.RequestException) -> bool:
+    """仅在看起来像代理/连接问题时，才尝试禁用环境代理重试。"""
+    retryable_types = (
+        requests.exceptions.ProxyError,
+        requests.exceptions.Timeout,
+        requests.exceptions.SSLError,
+    )
+    if isinstance(exc, retryable_types):
+        return True
+
+    if isinstance(exc, requests.exceptions.ConnectionError):
+        message = str(exc).lower()
+        markers = (
+            "proxy",
+            "connection refused",
+            "connection reset",
+            "tunnel connection failed",
+            "socks",
+        )
+        return any(marker in message for marker in markers)
+
+    return False
+
+
+def _get_with_proxy_fallback(url: str,
+                             *,
+                             params: Optional[Dict[str, Any]] = None,
+                             headers: Optional[Dict[str, str]] = None,
+                             timeout: int = 30,
+                             source_name: str = "Remote API") -> requests.Response:
+    """优先沿用当前环境代理；若代理失败或疑似代理 IP 被限流，则禁用代理重试一次。"""
+    request_headers = dict(DEFAULT_HTTP_HEADERS)
+    if headers:
+        request_headers.update(headers)
+
+    if not _has_env_proxy():
+        return requests.get(url, params=params, headers=request_headers, timeout=timeout)
+
+    try:
+        response = requests.get(url, params=params, headers=request_headers, timeout=timeout)
+    except requests.RequestException as exc:
+        if not _should_retry_without_proxy(exc):
+            raise
+
+        logger.warning("%s 通过环境代理请求失败: %s", source_name, exc)
+        logger.info("%s 尝试禁用环境代理后重试一次", source_name)
+        with requests.Session() as session:
+            session.trust_env = False
+            fallback_response = session.get(url, params=params, headers=request_headers, timeout=timeout)
+        logger.info("%s 禁用环境代理重试完成，HTTP %s", source_name, fallback_response.status_code)
+        return fallback_response
+
+    if response.status_code == 429:
+        logger.warning("%s 返回 429，检测到环境代理，尝试禁用环境代理重试一次", source_name)
+        response.close()
+        with requests.Session() as session:
+            session.trust_env = False
+            fallback_response = session.get(url, params=params, headers=request_headers, timeout=timeout)
+        logger.info("%s 禁用环境代理重试完成，HTTP %s", source_name, fallback_response.status_code)
+        return fallback_response
+
+    return response
+
+
+def _retry_after_seconds(response: requests.Response, default_seconds: int) -> int:
+    """从 Retry-After 头读取等待时间；没有则使用默认值。"""
+    value = response.headers.get("Retry-After")
+    if value:
+        try:
+            seconds = int(value)
+            if seconds > 0:
+                return seconds
+        except Exception:
+            pass
+    return max(1, int(default_seconds))
+
+
+def _get_with_rate_limit_backoff(url: str,
+                                 *,
+                                 params: Optional[Dict[str, Any]] = None,
+                                 headers: Optional[Dict[str, str]] = None,
+                                 timeout: int = 30,
+                                 source_name: str = "Remote API",
+                                 max_429_retries: int = 1,
+                                 retry_wait_seconds: int = 8) -> requests.Response:
+    """在代理回退之外，再对 429 做保守退避重试。"""
+    attempts = max(0, int(max_429_retries)) + 1
+
+    for attempt in range(1, attempts + 1):
+        response = _get_with_proxy_fallback(
+            url,
+            params=params,
+            headers=headers,
+            timeout=timeout,
+            source_name=source_name
+        )
+        if response.status_code != 429 or attempt == attempts:
+            return response
+
+        wait_s = _retry_after_seconds(response, retry_wait_seconds)
+        logger.warning("%s 返回 429，第 %d/%d 次退避 %d 秒后重试", source_name, attempt, attempts, wait_s)
+        response.close()
+        time.sleep(wait_s)
+
+    return response
+
+
 def _fetch_institutions_from_semantic_scholar(paper: Dict[str, Any],
                                                ss_api_base: str = "https://api.semanticscholar.org/graph/v1") -> List[str]:
     """从 Semantic Scholar 查询作者机构（发表论文的学校/企业等）
@@ -168,7 +292,12 @@ def _fetch_institutions_from_semantic_scholar(paper: Dict[str, Any],
             logger.debug(f"使用标题搜索机构: {title[:50]}...")
             search_url = f"{ss_api_base}/paper/search"
             params = {"query": title, "limit": 1, "fields": "paperId"}
-            response = requests.get(search_url, params=params, timeout=20)
+            response = _get_with_proxy_fallback(
+                search_url,
+                params=params,
+                timeout=20,
+                source_name="Semantic Scholar API"
+            )
 
             if response.status_code == 429:
                 logger.warning("Semantic Scholar API 限流，跳过机构查询")
@@ -188,7 +317,12 @@ def _fetch_institutions_from_semantic_scholar(paper: Dict[str, Any],
         paper_url = f"{ss_api_base}/paper/{paper_id}"
         params = {"fields": "authors.affiliations,authors.name"}
 
-        response = requests.get(paper_url, params=params, timeout=20)
+        response = _get_with_proxy_fallback(
+            paper_url,
+            params=params,
+            timeout=20,
+            source_name="Semantic Scholar API"
+        )
 
         if response.status_code == 429:
             logger.warning("Semantic Scholar API 限流")
@@ -929,7 +1063,10 @@ class NotionClient:
 class ArxivCrawler:
     """arXiv API 爬取器"""
     
-    BASE_URL = "http://export.arxiv.org/api/query"
+    BASE_URL = "https://export.arxiv.org/api/query"
+    PAGE_SIZE = 15
+    REQUEST_INTERVAL_S = 2.5
+    RETRY_WAIT_SECONDS = 8
     
     def __init__(self, keywords: List[str], days_back: int = 3):
         self.keywords = keywords
@@ -958,7 +1095,8 @@ class ArxivCrawler:
         cutoff_date = datetime.now() - timedelta(days=self.days_back)
         fetched = 0
         start = 0
-        page_size = 100  # 单次请求最大条数（适度，不要过大）
+        page_size = min(self.PAGE_SIZE, max_results)
+        request_count = 0
 
         try:
             import xml.etree.ElementTree as ET
@@ -978,9 +1116,24 @@ class ArxivCrawler:
                     "sortOrder": "descending"
                 }
 
+                if request_count > 0:
+                    logger.info("等待 %.1f 秒后继续请求 arXiv", self.REQUEST_INTERVAL_S)
+                    time.sleep(self.REQUEST_INTERVAL_S)
+
                 logger.info(f"正在搜索 arXiv: {query} (start={start}, max_results={this_page})")
-                response = requests.get(self.BASE_URL, params=params, timeout=30)
+                response = _get_with_rate_limit_backoff(
+                    self.BASE_URL,
+                    params=params,
+                    timeout=30,
+                    source_name="arXiv API",
+                    max_429_retries=1,
+                    retry_wait_seconds=self.RETRY_WAIT_SECONDS
+                )
+                if response.status_code == 429:
+                    logger.warning("arXiv API 持续返回 429，停止继续翻页以避免继续触发限流")
+                    break
                 response.raise_for_status()
+                request_count += 1
 
                 root = ET.fromstring(response.content)
                 entries = root.findall('atom:entry', ns)
@@ -1078,6 +1231,9 @@ class SemanticScholarCrawler:
     """Semantic Scholar API 爬取器（备用）"""
     
     BASE_URL = "https://api.semanticscholar.org/graph/v1/paper/search"
+    PAGE_SIZE = 10
+    REQUEST_INTERVAL_S = 5.0
+    RETRY_WAIT_SECONDS = 15
     
     def __init__(self, keywords: List[str], days_back: int = 3, enrich_institutions: bool = False):
         self.keywords = keywords
@@ -1088,110 +1244,140 @@ class SemanticScholarCrawler:
         """搜索最近的论文"""
         papers = []
         
-        query = " ".join(self.keywords)
+        cleaned_keywords = [kw.strip() for kw in self.keywords if isinstance(kw, str) and kw.strip()]
+        query = " ".join(cleaned_keywords)
         cutoff_date = (datetime.now() - timedelta(days=self.days_back)).strftime("%Y-%m-%d")
-        
-        params = {
-            "query": query,
-            "limit": max_results,
-            "fields": "title,authors.name,authors.affiliations,year,abstract,url,openAccessPdf,externalIds,venue,publicationDate",
-            "publicationDateOrYear": f"{cutoff_date}:"
-        }
-        
+
+        fetched = 0
+        offset = 0
+        page_size = min(self.PAGE_SIZE, max_results)
+        request_count = 0
+
         try:
-            logger.info(f"正在搜索 Semantic Scholar: {query}")
-            response = requests.get(self.BASE_URL, params=params, timeout=30)
-            
-            # 处理 429 限流错误
-            if response.status_code == 429:
-                logger.warning("Semantic Scholar API 限流 (429)，跳过此数据源")
-                logger.info("提示: Semantic Scholar 有请求频率限制，建议减少查询频率或稍后重试")
-                return []
-            
-            response.raise_for_status()
-            
-            data = response.json()
-            
-            for item in data.get('data', []):
-                title = item.get('title', 'Untitled')
-                abstract = item.get('abstract', '')
-
-                # 严格过滤：只保留真正的具身导航论文
-                if not is_navigation_related(title, abstract):
-                    logger.debug(f"过滤非导航论文: {title[:60]}")
-                    continue
-                
-                authors_list = item.get('authors', [])
-                authors_str = ", ".join([a.get('name', '') for a in authors_list])
-                
-                # 获取外部 ID
-                external_ids = item.get('externalIds', {}) or {}
-                doi = external_ids.get('DOI', '')
-                arxiv_id = external_ids.get('ArXiv', '')
-                
-                # 构建 PDF URL（优先级：openAccessPdf > arXiv 直接构建 > 空）
-                pdf_url = ""
-                if item.get('openAccessPdf'):
-                    pdf_url = item['openAccessPdf'].get('url', '')
-                elif arxiv_id:
-                    # 从 arXiv ID 构建 PDF 链接
-                    pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
-                    logger.debug(f"从 arXiv ID 构建 PDF 链接: {arxiv_id}")
-                
-                # 保存 DOI（优先 DOI，其次 ArXiv ID）
-                doi_field = doi if doi else (f"arXiv:{arxiv_id}" if arxiv_id else "")
-                
-                # 获取发布日期（优先使用 publicationDate，否则使用年份）
-                year = item.get('year', '')
-                pub_date = item.get('publicationDate', '')
-                if pub_date:
-                    published_date = pub_date  # 格式如 "2024-03-15"
-                elif year:
-                    published_date = f"{year}-01-01"
-                else:
-                    published_date = ""
-                
-                # 机构提取（直接从返回数据中获取，无需额外 API 调用）
-                institutions: List[str] = []
-                if self.enrich_institutions:
-                    for a in authors_list[:20]:  # 限制前 20 个作者
-                        # 直接从搜索结果中获取机构信息（authors.affiliations 已在 fields 中请求）
-                        affs = a.get('affiliations', []) or []
-                        for aff in affs:
-                            # affiliation 可能是字符串或字典
-                            if isinstance(aff, str):
-                                name = aff
-                            elif isinstance(aff, dict):
-                                name = aff.get('name') or aff.get('displayName')
-                            else:
-                                continue
-
-                            if name and name not in institutions:
-                                institutions.append(name)
-                                logger.debug(f"  ✓ 添加机构: {name}")
-
-                        if len(institutions) >= 15:  # 安全上限
-                            break
-
-                    if institutions:
-                        logger.info(f"✅ 从 {len(authors_list)} 位作者中提取到 {len(institutions)} 个机构")
-
-                paper = {
-                    'title': title,
-                    'authors': authors_str,
-                    'year': str(year),
-                    'abstract': abstract[:2000],
-                    'url': item.get('url', ''),
-                    'pdf_url': pdf_url,
-                    'doi': doi_field,  # 修复：使用 doi_field 而不是 doi
-                    'venue': item.get('venue', 'Conference'),
-                    'tags': ['Embodied Navigation', 'Semantic Scholar'],
-                    'published_date': published_date,  # 保存发布时间用于排序
-                    'institutions': institutions,
+            while fetched < max_results:
+                remaining = max_results - fetched
+                this_page = min(page_size, remaining)
+                params = {
+                    "query": query,
+                    "limit": this_page,
+                    "offset": offset,
+                    "fields": "title,authors.name,authors.affiliations,year,abstract,url,openAccessPdf,externalIds,venue,publicationDate",
+                    "publicationDateOrYear": f"{cutoff_date}:"
                 }
-                
-                papers.append(paper)
-            
+
+                if request_count > 0:
+                    logger.info("等待 %.1f 秒后继续请求 Semantic Scholar", self.REQUEST_INTERVAL_S)
+                    time.sleep(self.REQUEST_INTERVAL_S)
+
+                logger.info(f"正在搜索 Semantic Scholar: {query} (offset={offset}, limit={this_page})")
+                response = _get_with_rate_limit_backoff(
+                    self.BASE_URL,
+                    params=params,
+                    timeout=30,
+                    source_name="Semantic Scholar API",
+                    max_429_retries=1,
+                    retry_wait_seconds=self.RETRY_WAIT_SECONDS
+                )
+
+                if response.status_code == 429:
+                    logger.warning("Semantic Scholar API 限流 (429)，停止继续翻页")
+                    logger.info("提示: Semantic Scholar 有请求频率限制，建议减少查询频率或稍后重试")
+                    break
+
+                response.raise_for_status()
+                request_count += 1
+
+                data = response.json()
+                items = data.get('data', [])
+                if not items:
+                    break
+
+                for item in items:
+                    title = item.get('title', 'Untitled')
+                    abstract = item.get('abstract', '')
+
+                    # 严格过滤：只保留真正的具身导航论文
+                    if not is_navigation_related(title, abstract):
+                        logger.debug(f"过滤非导航论文: {title[:60]}")
+                        continue
+                    
+                    authors_list = item.get('authors', [])
+                    authors_str = ", ".join([a.get('name', '') for a in authors_list])
+                    
+                    # 获取外部 ID
+                    external_ids = item.get('externalIds', {}) or {}
+                    doi = external_ids.get('DOI', '')
+                    arxiv_id = external_ids.get('ArXiv', '')
+                    
+                    # 构建 PDF URL（优先级：openAccessPdf > arXiv 直接构建 > 空）
+                    pdf_url = ""
+                    if item.get('openAccessPdf'):
+                        pdf_url = item['openAccessPdf'].get('url', '')
+                    elif arxiv_id:
+                        # 从 arXiv ID 构建 PDF 链接
+                        pdf_url = f"https://arxiv.org/pdf/{arxiv_id}.pdf"
+                        logger.debug(f"从 arXiv ID 构建 PDF 链接: {arxiv_id}")
+                    
+                    # 保存 DOI（优先 DOI，其次 ArXiv ID）
+                    doi_field = doi if doi else (f"arXiv:{arxiv_id}" if arxiv_id else "")
+                    
+                    # 获取发布日期（优先使用 publicationDate，否则使用年份）
+                    year = item.get('year', '')
+                    pub_date = item.get('publicationDate', '')
+                    if pub_date:
+                        published_date = pub_date  # 格式如 "2024-03-15"
+                    elif year:
+                        published_date = f"{year}-01-01"
+                    else:
+                        published_date = ""
+                    
+                    # 机构提取（直接从返回数据中获取，无需额外 API 调用）
+                    institutions: List[str] = []
+                    if self.enrich_institutions:
+                        for a in authors_list[:20]:  # 限制前 20 个作者
+                            # 直接从搜索结果中获取机构信息（authors.affiliations 已在 fields 中请求）
+                            affs = a.get('affiliations', []) or []
+                            for aff in affs:
+                                # affiliation 可能是字符串或字典
+                                if isinstance(aff, str):
+                                    name = aff
+                                elif isinstance(aff, dict):
+                                    name = aff.get('name') or aff.get('displayName')
+                                else:
+                                    continue
+
+                                if name and name not in institutions:
+                                    institutions.append(name)
+                                    logger.debug(f"  ✓ 添加机构: {name}")
+
+                            if len(institutions) >= 15:  # 安全上限
+                                break
+
+                        if institutions:
+                            logger.info(f"✅ 从 {len(authors_list)} 位作者中提取到 {len(institutions)} 个机构")
+
+                    paper = {
+                        'title': title,
+                        'authors': authors_str,
+                        'year': str(year),
+                        'abstract': abstract[:2000],
+                        'url': item.get('url', ''),
+                        'pdf_url': pdf_url,
+                        'doi': doi_field,  # 修复：使用 doi_field 而不是 doi
+                        'venue': item.get('venue', 'Conference'),
+                        'tags': ['Embodied Navigation', 'Semantic Scholar'],
+                        'published_date': published_date,  # 保存发布时间用于排序
+                        'institutions': institutions,
+                    }
+                    
+                    papers.append(paper)
+
+                fetched += this_page
+                offset += this_page
+
+                if len(items) < this_page:
+                    break
+
             logger.info(f"从 Semantic Scholar 找到 {len(papers)} 篇论文")
             return papers
             
@@ -1759,8 +1945,8 @@ def main():
         'robot path planning',
     ])
     days_back = config.get('days_back', 3)
-    arxiv_max_results = int(config.get('arxiv_max_results', 200))
-    ss_max_results = int(config.get('semantic_scholar_max_results', 50))
+    arxiv_max_results = int(config.get('arxiv_max_results', 30))
+    ss_max_results = int(config.get('semantic_scholar_max_results', 15))
 
     if not notion_token or not database_id:
         logger.error("配置文件缺少 notion_token 或 database_id")
