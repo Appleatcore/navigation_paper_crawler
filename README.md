@@ -41,3 +41,20 @@ python3 paper_crawler.py config.local.json
 - `x_mol` 作为主数据源
 - `openalex`、`crossref` 作为公开接口兜底
 - `semantic_scholar` 保持可选，不默认启用
+
+维护脚本：
+
+```bash
+# 预览 Recommend Score < 50 的论文，不实际删除
+python3 delete_low_score_papers.py config.local.json
+
+# 实际归档删除 Recommend Score < 50 的论文
+python3 delete_low_score_papers.py config.local.json --execute
+
+# 自定义阈值
+python3 delete_low_score_papers.py config.local.json --threshold 40 --execute
+```
+
+说明：
+- Notion 不支持硬删除页面，脚本实际执行的是 `archived=true`
+- 默认是预览模式，只有传入 `--execute` 才会归档

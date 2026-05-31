@@ -44,3 +44,11 @@
 - 更新 `config.template.json`
 - 更新 `README.md`
 - 保留 `target_websites` 记录用途，但默认运行逻辑不再依赖 `arxiv`
+
+## 6. 低分论文清理脚本
+
+- 新增 `delete_low_score_papers.py`
+- 参考 `navigation_paper_crawler/delete_low_score_papers.py` 实现
+- 按 `Recommend Score < 50` 查询 Notion 数据库中的论文
+- 默认仅预览，传入 `--execute` 后将页面归档删除
+- 支持通过 `--threshold` 自定义清理阈值
