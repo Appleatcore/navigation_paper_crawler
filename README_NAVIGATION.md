@@ -139,6 +139,7 @@ tail -f paper_crawler.log
   "use_semantic_scholar": true,
   "enrich_institutions": true,
   "recommend_score_enabled": true,
+  "min_recommend_score": 60,
   "llm_recommend_score_enabled": true,
   "llm_max_papers": 5,
   "log_level": "INFO"
@@ -165,6 +166,8 @@ tail -f paper_crawler.log
   - 从 `15` 调到 `30` 或 `50`
 - `max_papers`
   - 控制最终写入 Notion 的上限
+- `min_recommend_score`
+  - 控制论文写入 Notion 的最低推荐评分，默认 `60`；低于该分数的论文会被跳过
 - `llm_max_papers`
   - 控制有多少篇会调用大模型评分
 

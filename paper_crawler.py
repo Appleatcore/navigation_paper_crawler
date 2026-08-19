@@ -1546,6 +1546,35 @@ class ScoringEngine:
         return round(final_score, 2)
 
 
+def filter_papers_by_recommend_score(papers: List[Dict], min_score: float = 60.0) -> List[Dict]:
+    """过滤推荐评分低于入库阈值的论文。
+
+    没有有效评分的论文会保留，避免评分服务异常导致论文被误过滤。
+    """
+    filtered_papers = []
+    filtered_count = 0
+
+    for paper in papers:
+        score = paper.get('recommend_score')
+        try:
+            below_threshold = score is not None and float(score) < min_score
+        except (TypeError, ValueError):
+            below_threshold = False
+
+        if below_threshold:
+            filtered_count += 1
+            logger.info(
+                "⊘ 推荐评分 %.2f 低于入库阈值 %.2f，跳过: %s",
+                float(score), min_score, paper.get('title', 'Unknown')[:80]
+            )
+        else:
+            filtered_papers.append(paper)
+
+    if filtered_count:
+        logger.info("✅ 按推荐评分过滤: 保留 %d 篇，过滤 %d 篇", len(filtered_papers), filtered_count)
+    return filtered_papers
+
+
 class PDFParser:
     """PDF 全文解析器（提取文本和图片用于深度评分）"""
     
@@ -2074,6 +2103,13 @@ def main():
             except Exception as e:
                 logger.warning("推荐评分计算失败（忽略该条）: %s", e)
     
+    # 过滤低于最低入库评分的论文
+    min_recommend_score = float(config.get('min_recommend_score', 60))
+    if config.get('recommend_score_enabled', True):
+        all_papers = filter_papers_by_recommend_score(all_papers, min_recommend_score)
+    else:
+        logger.info("推荐评分未启用，跳过最低入库评分过滤")
+
     # 初始化图片提取器（如果启用）
     extract_figures = config.get('extract_figures', False)
     figure_extractor = None
