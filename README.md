@@ -29,6 +29,8 @@ python3 paper_crawler.py config.local.json
 - `exclude_keywords`
 - `source_preferences`
 
+新论文入库前会按推荐评分过滤。`min_recommend_score` 默认是 `60`，低于该分数的论文不会写入 Notion；可在 `config.local.json` 中调整。
+
 当前代码支持的数据源：
 - `x_mol`
 - `openalex`

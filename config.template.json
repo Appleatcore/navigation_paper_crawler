@@ -43,6 +43,7 @@
   "enrich_institutions": true,
   "extract_figures": false,
   "recommend_score_enabled": true,
+  "min_recommend_score": 60,
   "llm_recommend_score_enabled": true,
   "llm_provider": "openai-compatible",
   "llm_model": "qwen-vl-plus",
