@@ -126,6 +126,71 @@ cd /path/to/navigation_paper_crawler
 tail -f paper_crawler.log
 ```
 
+## 批量回答论文细节问题
+
+先在 Notion 文献数据库中创建名为 `Question details` 的 text 属性，然后运行：
+
+```bash
+python3 answer_question_details.py config.local.json
+```
+
+脚本会优先读取 PDF 全文，PDF 不可用时回退到摘要和元数据，并写入以下内容：主要问题、方法概述、导航类型和分类依据。导航类型为 `VLN`、`VN`、`Point Navigation` 或 `Other/Unclear`。
+
+正常运行主爬虫时也会自动为准备入库的新论文生成并写入该字段：
+
+```bash
+python3 paper_crawler.py config.local.json
+```
+
+此行为由 `question_details_enabled` 控制，默认启用。主爬虫会先过滤低分论文并应用 `max_papers` 上限，再调用大模型生成详情。
+
+默认跳过已经填写过 `Question details` 的论文。常用选项：
+
+```bash
+# 只处理一篇并预览答案，不写数据库
+python3 answer_question_details.py config.local.json --limit 1 --dry-run
+
+# 重新回答并覆盖已有内容
+python3 answer_question_details.py config.local.json --overwrite
+
+# 只根据摘要和元数据回答，不下载 PDF
+python3 answer_question_details.py config.local.json --abstract-only
+```
+
+只补全 `Recommend Score >= 85` 且 `Question details` 为空的论文，并按评分从高到低处理：
+
+```bash
+python3 answer_high_score_question_details.py config.local.json
+```
+
+建议先预览一篇：
+
+```bash
+python3 answer_high_score_question_details.py config.local.json --limit 1 --dry-run
+```
+
+可以通过 `--threshold` 修改阈值，例如 `--threshold 90`。
+
+## 人工逐篇总结工作流
+
+生成评分不低于 85、且尚未填写 `Question details` 的人工处理队列：
+
+```bash
+python3 prepare_manual_question_queue.py config.local.json
+```
+
+队列默认保存到 `output/manual_question_queue.jsonl`，包含 `page_id`、标题、评分、PDF 链接、摘要和处理状态，并按评分从高到低排列。该脚本只调用 Notion API，不调用大模型 API。
+
+准备好一篇论文的中文总结后，将内容保存为 UTF-8 文本文件，再安全写入单个页面：
+
+```bash
+python3 write_manual_question_detail.py config.local.json \
+  --page-id "从队列中复制的 page_id" \
+  --text-file output/question_detail.txt
+```
+
+写入工具会拒绝覆盖已有内容，只提交 `Question details` 字段，写入后回读核对，并把对应队列项的 `status` 更新为 `done`。
+
 ## 推荐的首次测试配置
 
 首次部署建议先用偏保守的配置，确认链路通了再放大：
