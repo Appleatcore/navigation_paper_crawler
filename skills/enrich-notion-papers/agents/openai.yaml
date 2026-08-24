@@ -1,0 +1,4 @@
+interface:
+  display_name: "Notion 论文信息补全"
+  short_description: "逐篇研究 Notion 论文并安全补全中文详情与官方 GitHub 仓库链接"
+  default_prompt: "Use $enrich-notion-papers to process the pending Notion paper queue and safely fill Chinese Question details and verified official GitHub source websites."
