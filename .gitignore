@@ -51,6 +51,7 @@ preview_images.html
 
 # Local generated assets
 images/
+output/
 TMP_*.txt
 *.tmp
 *.temp
