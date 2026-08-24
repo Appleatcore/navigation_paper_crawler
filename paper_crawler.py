@@ -575,17 +575,19 @@ class NotionClient:
             logger.warning("无法自动添加指标属性（忽略，仍尝试写入已存在字段）: %s", e)
     
     def ensure_enrichment_properties(self):
-        """确保数据库存在扩展属性（机构 & 推荐评分）。
+        """确保数据库存在扩展属性（机构、推荐评分和问题详情）。
 
         创建的属性：
           - Institutions: multi_select
           - Recommend Score: number
           - Recommend Rationale: rich_text
+          - Question details: rich_text
         """
         desired = {
             "Institutions": {"multi_select": {}},
             "Recommend Score": {"number": {}},
-            "Recommend Rationale": {"rich_text": {}}
+            "Recommend Rationale": {"rich_text": {}},
+            "Question details": {"rich_text": {}}
         }
         try:
             props = self._get_database()
@@ -721,6 +723,7 @@ class NotionClient:
             'Institutions': 'institutions',
             'Recommend Score': 'recommend_score',
             'Recommend Rationale': 'recommend_rationale',
+            'Question details': 'question_details',
             'Framework Diagram': 'framework_diagram',
             'Authors': 'authors',
             'Abstract': 'abstract',
@@ -970,6 +973,14 @@ class NotionClient:
             properties["Recommend Rationale"] = {
                 "rich_text": [
                     {"text": {"content": str(paper['recommend_rationale'])[:2000]}}
+                ]
+            }
+
+        # 论文问题详情（可选）
+        if paper.get('question_details'):
+            properties["Question details"] = {
+                "rich_text": [
+                    {"text": {"content": str(paper['question_details'])[:2000]}}
                 ]
             }
 
@@ -1941,6 +1952,179 @@ class LLMScoringEngine:
             return None, None
 
 
+QUESTION_DETAILS_PROPERTY = "Question details"
+MAX_QUESTION_DETAILS_LENGTH = 1900
+
+
+def _extract_llm_message_text(content: Any) -> str:
+    """兼容 OpenAI-compatible API 的字符串或内容块响应。"""
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        parts = []
+        for item in content:
+            if isinstance(item, dict) and isinstance(item.get("text"), str):
+                parts.append(item["text"])
+        return "\n".join(parts).strip()
+    return ""
+
+
+def _parse_question_details_answer(content: str) -> Dict[str, str]:
+    """解析模型返回的 JSON，并规范导航类型。"""
+    start = content.find("{")
+    end = content.rfind("}")
+    if start < 0 or end <= start:
+        raise ValueError("模型响应中没有 JSON 对象")
+
+    data = json.loads(content[start:end + 1])
+    problem = str(data.get("problem") or "").strip()
+    method = str(data.get("method") or "").strip()
+    navigation_type_raw = str(data.get("navigation_type") or "").strip()
+    type_reason = str(data.get("type_reason") or "").strip()
+
+    if not problem or not method:
+        raise ValueError("模型响应缺少 problem 或 method")
+
+    normalized = navigation_type_raw.lower().replace("_", " ").replace("-", " ")
+    if "vln" in normalized or "vision language" in normalized:
+        navigation_type = "VLN"
+    elif "point" in normalized:
+        navigation_type = "Point Navigation"
+    elif normalized == "vn" or "visual navigation" in normalized or "vision navigation" in normalized:
+        navigation_type = "VN"
+    else:
+        navigation_type = "Other/Unclear"
+
+    return {
+        "problem": problem,
+        "method": method,
+        "navigation_type": navigation_type,
+        "type_reason": type_reason or "论文信息不足，无法给出更具体的分类依据。",
+    }
+
+
+def format_question_details(answer: Dict[str, str]) -> str:
+    """把结构化答案整理为适合 Notion text 字段的中文文本。"""
+    text = (
+        f"主要问题：{answer['problem']}\n"
+        f"方法概述：{answer['method']}\n"
+        f"导航类型：{answer['navigation_type']}\n"
+        f"判断依据：{answer['type_reason']}"
+    )
+    return text[:MAX_QUESTION_DETAILS_LENGTH]
+
+
+class QuestionDetailsAnswerer:
+    """基于 OpenAI-compatible Chat Completions API 回答论文细节问题。"""
+
+    def __init__(self, config: Dict[str, Any], abstract_only: bool = False):
+        self.api_key = config.get("llm_api_key") or os.environ.get("OPENAI_API_KEY")
+        self.model = config.get("llm_model", "gpt-4o-mini")
+        api_base = config.get("llm_api_base") or "https://api.openai.com/v1"
+        self.endpoint = f"{api_base.rstrip('/')}/chat/completions"
+        self.temperature = float(config.get("llm_temperature", 0.1))
+        self.timeout = int(config.get("llm_timeout", 120))
+        self.max_tokens = int(config.get("question_details_max_tokens", 500))
+        self.use_full_pdf = (
+            bool(config.get("question_details_use_full_pdf", True))
+            and not abstract_only
+        )
+        self.pdf_max_pages = int(config.get("llm_pdf_max_pages", 30))
+        self.pdf_max_chars = int(config.get("llm_pdf_max_chars", 50000))
+
+    def _paper_content(self, paper: Dict[str, Any]) -> Dict[str, Any]:
+        content = {
+            "title": paper.get("title"),
+            "abstract": paper.get("abstract") or "",
+            "authors": paper.get("authors") or "",
+            "year": paper.get("year"),
+            "doi": paper.get("doi"),
+            "url": paper.get("url"),
+        }
+
+        pdf_url = paper.get("pdf_url") or _derive_pdf_link(paper)
+        if self.use_full_pdf and pdf_url:
+            logger.info("下载并解析 PDF: %s", paper.get("title", "Unknown")[:80])
+            pdf_result = PDFParser.download_and_parse_pdf(
+                pdf_url,
+                max_pages=self.pdf_max_pages,
+                max_chars=self.pdf_max_chars,
+                extract_images=False,
+                max_images=0,
+            )
+            if pdf_result.get("full_text"):
+                content["full_pdf_text"] = pdf_result["full_text"]
+                content["reading_source"] = "PDF full text"
+            else:
+                content["reading_source"] = "abstract and metadata (PDF unavailable)"
+        else:
+            content["reading_source"] = "abstract and metadata"
+
+        return content
+
+    def answer_paper(self, paper: Dict[str, Any]) -> str:
+        if not self.api_key:
+            raise ValueError("配置文件缺少 llm_api_key，且环境变量 OPENAI_API_KEY 未设置")
+
+        system_prompt = (
+            "你是具身导航领域的论文分析专家。请严格根据提供的论文全文、摘要或元数据回答，"
+            "不要虚构论文未提供的信息。回答以下问题：\n"
+            "1. 论文主要解决什么问题？\n"
+            "2. 论文采用了什么方法？请简要概括核心技术路线。\n"
+            "3. 论文的主要导航任务属于哪一类？必须只选择一个主类别：\n"
+            "   - VLN：自然语言指令或语言目标是导航输入的核心组成；\n"
+            "   - Point Navigation：目标由坐标、相对位置或点目标给出；\n"
+            "   - VN：依靠视觉观测完成导航，但主要任务不属于 VLN 或 Point Navigation；\n"
+            "   - Other/Unclear：不属于上述类别，或现有信息不足。\n"
+            "如果论文涉及多种任务，按论文的主要实验任务选择。\n"
+            "problem、method 和 type_reason 的内容必须使用简体中文表达；"
+            "模型名称、数据集名称、专业术语和 VLN/VN 等缩写可以保留英文。\n"
+            "只返回 JSON，不要输出 Markdown："
+            '{"problem":"...","method":"...","navigation_type":"VLN|VN|Point Navigation|Other/Unclear",'
+            '"type_reason":"..."}'
+        )
+        body = {
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": json.dumps(self._paper_content(paper), ensure_ascii=False),
+                },
+            ],
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+        }
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+
+        for attempt in range(3):
+            response = requests.post(
+                self.endpoint,
+                headers=headers,
+                json=body,
+                timeout=self.timeout,
+            )
+            if (response.status_code == 429 or response.status_code >= 500) and attempt < 2:
+                wait_seconds = 2 ** (attempt + 1)
+                logger.warning(
+                    "LLM API 返回 %d，%d 秒后重试",
+                    response.status_code,
+                    wait_seconds,
+                )
+                time.sleep(wait_seconds)
+                continue
+            response.raise_for_status()
+            data = response.json()
+            raw_content = (data.get("choices") or [{}])[0].get("message", {}).get("content", "")
+            content = _extract_llm_message_text(raw_content)
+            return format_question_details(_parse_question_details_answer(content))
+
+        raise RuntimeError("LLM API 调用失败")
+
+
 def load_config(config_path: str = "config_lcj.json") -> Dict:
     """加载配置文件"""
     if not os.path.exists(config_path):
@@ -2110,6 +2294,42 @@ def main():
     else:
         logger.info("推荐评分未启用，跳过最低入库评分过滤")
 
+    max_papers_to_add = int(config.get('max_papers', 999))
+
+    # 为准备入库的论文生成 Question details
+    if config.get('question_details_enabled', True):
+        try:
+            notion.ensure_enrichment_properties()
+        except Exception as e:
+            logger.warning("无法确认/创建 Question details 属性: %s", e)
+
+        details_answerer = QuestionDetailsAnswerer(config)
+        if not details_answerer.api_key:
+            logger.warning("Question details 已启用但未提供 API Key，跳过详情生成")
+        else:
+            if details_answerer.use_full_pdf and not PDF_PARSING_AVAILABLE:
+                logger.warning("Question details 全文阅读已启用但 PyMuPDF 未安装，将回退到摘要和元数据")
+                details_answerer.use_full_pdf = False
+
+            papers_for_details = all_papers[:max_papers_to_add]
+            details_interval_s = float(config.get('llm_call_interval_s', 1.0))
+            logger.info("开始生成 %d 篇论文的 Question details", len(papers_for_details))
+            for idx, paper in enumerate(papers_for_details, start=1):
+                try:
+                    logger.info(
+                        "生成 Question details (%d/%d): %s",
+                        idx,
+                        len(papers_for_details),
+                        paper.get('title', 'Unknown')[:80]
+                    )
+                    paper['question_details'] = details_answerer.answer_paper(paper)
+                    logger.info("Question details 生成完成: %s", paper.get('title', 'Unknown')[:80])
+                except Exception as e:
+                    logger.warning("Question details 生成失败（仍继续入库）: %s", e)
+
+                if idx < len(papers_for_details):
+                    time.sleep(details_interval_s)
+
     # 初始化图片提取器（如果启用）
     extract_figures = config.get('extract_figures', False)
     figure_extractor = None
@@ -2135,7 +2355,6 @@ def main():
         logger.warning("无法确认/创建 Date 属性: %s", e)
 
     added_count = 0
-    max_papers_to_add = config.get('max_papers', 999)  # 从配置读取，默认999篇
     for paper in all_papers:
         # 论文数量限制
         if added_count >= max_papers_to_add:
