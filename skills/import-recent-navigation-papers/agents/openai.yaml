@@ -1,0 +1,4 @@
+interface:
+  display_name: "近期导航论文入库"
+  short_description: "检索近期导航论文，人工筛选并安全导入 Notion、补全详情与代码链接"
+  default_prompt: "Use $import-recent-navigation-papers to find navigation papers from the last 5 days without an external LLM API, import qualified papers into Notion, and fill Chinese details plus verified official GitHub links."
