@@ -15,6 +15,11 @@ cp config.template.json config.local.json
 python3 paper_crawler.py config.local.json
 ```
 
+## 模型平台推荐（可选）
+
+推荐使用 [OrcaRouter](https://api.orcarouter.ai/ref/ref_744ab625079d79508a5b) 平台上的模型，以便更方便地统一接入和切换模型；
+Get key at [OrcaRouter](https://api.orcarouter.ai/ref/ref_744ab625079d79508a5b)
+
 ## 代理兜底说明
 
 - 论文源请求目前会先按当前环境代理发起访问。
