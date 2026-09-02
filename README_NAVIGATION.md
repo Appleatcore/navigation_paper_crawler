@@ -69,7 +69,10 @@ python3 -m pip install -r requirements.txt
 
 ```bash
 cp config.template.json config.local.json
+cp .env.example .env
 ```
+
+在 `.env` 中填写 `ORCAROUTER_API_KEY`，或在执行前直接 `export ORCAROUTER_API_KEY="你的 OrcaRouter API Key"`。
 
 然后编辑 `config.local.json`，至少填这几项：
 
@@ -77,12 +80,14 @@ cp config.template.json config.local.json
 {
   "notion_token": "你的 Notion integration token",
   "database_id": "你的 Notion database id",
-  "llm_provider": "openai-compatible",
-  "llm_model": "qwen-plus",
-  "llm_api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-  "llm_api_key": "你的百炼 API Key"
+  "llm_provider": "orcarouter",
+  "llm_model": "qwen/qwen3-vl-235b-a22b-thinking",
+  "llm_api_base": "https://api.orcarouter.ai/v1",
+  "llm_api_key": ""
 }
 ```
+
+当 `llm_provider` 为 `orcarouter` 且 `llm_api_key` 为空时，程序会从 `ORCAROUTER_API_KEY` 环境变量读取密钥。也可以将 `llm_provider`、模型、API 地址和密钥改为其他兼容服务；OrcaRouter 不是强制选项。
 
 ## Notion 数据库要求
 

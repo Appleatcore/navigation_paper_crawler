@@ -51,6 +51,18 @@ logger = logging.getLogger(__name__)
 DEFAULT_HTTP_HEADERS = {
     "User-Agent": "navigation-paper-crawler/1.0"
 }
+ORCAROUTER_API_BASE = "https://api.orcarouter.ai/v1"
+
+
+def llm_api_key_env_name(provider: Optional[str]) -> str:
+    """返回指定 provider 使用的 API Key 环境变量名。"""
+    normalized_provider = str(provider or "openai").strip().lower()
+    return "ORCAROUTER_API_KEY" if normalized_provider == "orcarouter" else "OPENAI_API_KEY"
+
+
+def resolve_llm_api_key(provider: Optional[str], configured_key: Optional[str]) -> Optional[str]:
+    """优先使用配置文件中的密钥，否则读取 provider 对应的环境变量。"""
+    return configured_key or os.environ.get(llm_api_key_env_name(provider))
 
 
 def apply_log_level(level_name: str) -> None:
@@ -1746,19 +1758,20 @@ class LLMScoringEngine:
     """使用大模型进行推荐评分（支持 PDF 全文输入）。
 
     默认对接 OpenAI 兼容的 Chat Completions 接口；
-    - provider: "openai" 或 "openai-compatible"
+    - provider: "orcarouter"、"openai" 或 "openai-compatible"
     - api_base: 默认为 https://api.openai.com/v1
-    - api_key: 建议从环境变量 OPENAI_API_KEY 提供
+    - api_key: OrcaRouter 从 ORCAROUTER_API_KEY 提供，其他 provider 从 OPENAI_API_KEY 提供
     - use_full_pdf: 是否下载并解析 PDF 全文（默认 False）
     """
     def __init__(self, provider: str = "openai", api_key: Optional[str] = None, model: str = "gpt-4o-mini",
                  api_base: Optional[str] = None, temperature: float = 0.2, timeout: int = 30, max_tokens: int = 300,
                  use_full_pdf: bool = False, pdf_max_pages: int = 30, pdf_max_chars: int = 50000,
                  pdf_extract_images: bool = True, pdf_max_images: int = 10):
-        self.provider = provider
-        self.api_key = api_key or os.environ.get("OPENAI_API_KEY")
+        self.provider = str(provider or "openai").strip().lower()
+        self.api_key = resolve_llm_api_key(self.provider, api_key)
         self.model = model
-        self.api_base = api_base.rstrip("/") if api_base else "https://api.openai.com/v1"
+        default_api_base = ORCAROUTER_API_BASE if self.provider == "orcarouter" else "https://api.openai.com/v1"
+        self.api_base = api_base.rstrip("/") if api_base else default_api_base
         self.temperature = float(temperature)
         self.timeout = int(timeout)
         self.max_tokens = int(max_tokens)
@@ -2018,9 +2031,11 @@ class QuestionDetailsAnswerer:
     """基于 OpenAI-compatible Chat Completions API 回答论文细节问题。"""
 
     def __init__(self, config: Dict[str, Any], abstract_only: bool = False):
-        self.api_key = config.get("llm_api_key") or os.environ.get("OPENAI_API_KEY")
+        self.provider = str(config.get("llm_provider", "openai") or "openai").strip().lower()
+        self.api_key = resolve_llm_api_key(self.provider, config.get("llm_api_key"))
         self.model = config.get("llm_model", "gpt-4o-mini")
-        api_base = config.get("llm_api_base") or "https://api.openai.com/v1"
+        default_api_base = ORCAROUTER_API_BASE if self.provider == "orcarouter" else "https://api.openai.com/v1"
+        api_base = config.get("llm_api_base") or default_api_base
         self.endpoint = f"{api_base.rstrip('/')}/chat/completions"
         self.temperature = float(config.get("llm_temperature", 0.1))
         self.timeout = int(config.get("llm_timeout", 120))
@@ -2245,7 +2260,7 @@ def main():
         if llm_enabled:
             llm_engine = LLMScoringEngine(
                 provider=config.get('llm_provider', 'openai'),
-                api_key=config.get('llm_api_key') or os.environ.get('OPENAI_API_KEY'),
+                api_key=config.get('llm_api_key'),
                 model=config.get('llm_model', 'gpt-4o-mini'),
                 api_base=config.get('llm_api_base'),
                 temperature=float(config.get('llm_temperature', 0.2)),
@@ -2429,7 +2444,7 @@ def main():
             if patch_config.get('recommend_score', {}).get('enabled', False):
                 llm_engine_for_patch = LLMScoringEngine(
                     provider=config.get('llm_provider', 'openai'),
-                    api_key=config.get('llm_api_key') or os.environ.get('OPENAI_API_KEY'),
+                    api_key=config.get('llm_api_key'),
                     model=config.get('llm_model', 'gpt-4o-mini'),
                     api_base=config.get('llm_api_base'),
                     temperature=float(config.get('llm_temperature', 0.2)),

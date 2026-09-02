@@ -12,6 +12,7 @@ from paper_crawler import (
     QuestionDetailsAnswerer,
     apply_log_level,
     load_config,
+    llm_api_key_env_name,
     logger,
 )
 
@@ -82,7 +83,10 @@ def main() -> int:
 
     answerer = QuestionDetailsAnswerer(config, abstract_only=args.abstract_only)
     if not answerer.api_key:
-        logger.error("配置文件缺少 llm_api_key，且环境变量 OPENAI_API_KEY 未设置")
+        logger.error(
+            "配置文件缺少 llm_api_key，且环境变量 %s 未设置",
+            llm_api_key_env_name(config.get("llm_provider", "openai")),
+        )
         return 1
 
     notion = NotionClient(notion_token, database_id)

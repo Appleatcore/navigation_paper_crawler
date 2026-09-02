@@ -12,13 +12,16 @@ python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install -r requirements.txt
 cp config.template.json config.local.json
+export ORCAROUTER_API_KEY="你的 OrcaRouter API Key"
 python3 paper_crawler.py config.local.json
 ```
 
 ## 模型平台推荐（可选）
 
-推荐使用 [OrcaRouter](https://api.orcarouter.ai/ref/ref_744ab625079d79508a5b) 平台上的模型，以便更方便地统一接入和切换模型；
+推荐但不强制使用 [OrcaRouter](https://api.orcarouter.ai/ref/ref_744ab625079d79508a5b) 平台上的模型，以便更方便地统一接入和切换模型。
 Get key at [OrcaRouter](https://api.orcarouter.ai/ref/ref_744ab625079d79508a5b)
+
+公开配置模板中已经提供了可识别的 `orcarouter` provider 配置；API Key 建议通过 `ORCAROUTER_API_KEY` 环境变量提供，不要提交真实密钥。
 
 ## 代理兜底说明
 
