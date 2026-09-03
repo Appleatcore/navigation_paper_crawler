@@ -7,6 +7,7 @@ Notion API 不支持真正硬删除页面，这里采用归档方式，相当于
 """
 
 import argparse
+import re
 import sys
 import time
 from typing import Any, Dict, List
@@ -16,7 +17,19 @@ import requests
 from paper_crawler import NotionClient, apply_log_level, load_config, logger
 
 
-def fetch_low_score_papers(notion: NotionClient, threshold: float, page_size: int = 100) -> List[Dict[str, Any]]:
+UAV_TITLE_PATTERN = re.compile(
+    r"\b(?:uavs?|drones?|quadrotors?|quadcopters?|aerial|airborne|multirotors?|bicopters?|blimps?)\b"
+    r"|无人机|无人飞行器|空中机器人",
+    re.IGNORECASE,
+)
+
+
+def fetch_low_score_papers(
+    notion: NotionClient,
+    threshold: float,
+    page_size: int = 100,
+    uav_only: bool = False,
+) -> List[Dict[str, Any]]:
     """查询评分低于阈值的论文页面。"""
     papers: List[Dict[str, Any]] = []
     has_more = True
@@ -63,6 +76,9 @@ def fetch_low_score_papers(notion: NotionClient, threshold: float, page_size: in
                 "recommend_score": score,
             })
 
+            if uav_only and not UAV_TITLE_PATTERN.search(title):
+                papers.pop()
+
         has_more = data.get("has_more", False)
         start_cursor = data.get("next_cursor")
         if has_more:
@@ -86,6 +102,11 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="归档删除 Notion 数据库中评分低于阈值的论文")
     parser.add_argument("config", nargs="?", default="config.local.json", help="配置文件路径，默认 config.local.json")
     parser.add_argument("--threshold", type=float, default=50.0, help="删除阈值，默认 50")
+    parser.add_argument(
+        "--uav-only",
+        action="store_true",
+        help="仅处理标题明确属于 UAV/无人机/空中机器人领域的论文",
+    )
     parser.add_argument("--execute", action="store_true", help="实际执行归档删除；默认仅预览")
     parser.add_argument("--delay", type=float, default=0.3, help="每次归档之间的等待秒数，默认 0.3")
     return parser.parse_args()
@@ -104,9 +125,10 @@ def main() -> int:
 
     notion = NotionClient(notion_token, database_id)
 
-    logger.info("开始查询 Recommend Score < %.2f 的论文", args.threshold)
+    scope = "且标题属于 UAV/无人机领域" if args.uav_only else ""
+    logger.info("开始查询 Recommend Score < %.2f 的论文 %s", args.threshold, scope)
     try:
-        papers = fetch_low_score_papers(notion, threshold=args.threshold)
+        papers = fetch_low_score_papers(notion, threshold=args.threshold, uav_only=args.uav_only)
     except Exception as exc:
         logger.error("查询低分论文失败: %s", exc)
         return 1
